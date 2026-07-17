@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "run-farm"
+version = "0.1.0"
+description = "Checkpointed, config-hashed campaign runs over a rented GPU spot fleet: restart-exact registry, event records, probe-or-bail admission, and leak-proof cloud brokers (Vast/RunPod/Modal)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+  { name = "James P. Galasyn" },
+  { name = "Claude Théodore" },
+]
+keywords = [
+  "campaign", "spot-instances", "checkpointing", "reproducibility",
+  "provenance", "gpu", "vast-ai", "runpod", "modal", "jax",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+  # jax is used ONLY to hand checkpointed arrays back as jnp (config.load_checkpoint,
+  # store._load_checkpoint) and by the lazy device probe in reference.ProbeAdmission.
+  # NOT scipy -- run-farm does no numerics.
+  "jax>=0.4.30",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "pytest-cov>=4",
+  "pytest-xdist>=3",        # parallel test execution (pytest -n auto)
+]
+# Serverless executor (run_farm.modal_exec). Optional: `import run_farm` must not
+# require the modal SDK.
+modal = ["modal>=0.64"]
+# Object-store registry/sink backend (run_farm.store.S3BlobStore).
+s3 = ["boto3>=1.34"]
+# NOTE: run_farm.vast is deliberately stdlib-urllib-only -- no extra, on purpose.
+# The vastai SDK breaks against the live API (P10); that is the whole point of the
+# F seam. Do not add a `vast` extra.
+
+[project.urls]
+Homepage = "https://github.com/JimGalasyn/run-farm"
+Issues = "https://github.com/JimGalasyn/run-farm/issues"
+
+[project.scripts]
+run-farm-reap = "run_farm.reap:main"
+run-farm-status = "run_farm.status:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/run_farm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["run_farm"]
+omit = [
+  # Optional cloud integration: needs the `modal` SDK (not a CI test dep) and a
+  # live Modal account/GPU to exercise. Its run_one unit + the seam it plugs into
+  # are covered; the modal-specific glue can't be unit-tested without modal.
+  "*/run_farm/modal_exec.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+  "\\.\\.\\.",                 # Protocol method bodies (ellipsis stubs)
+  "if TYPE_CHECKING:",
+  "def __str__",              # cosmetic formatters
+  "def __repr__",
+]

@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+title: "run-farm: checkpointed campaign runs over a rented GPU spot fleet"
+message: "If you use this software, please cite it using these metadata."
+type: software
+authors:
+  - given-names: James P.
+    family-names: Galasyn
+  - given-names: Claude
+    family-names: Théodore
+repository-code: "https://github.com/JimGalasyn/run-farm"
+url: "https://github.com/JimGalasyn/run-farm"
+abstract: >-
+  A physics-agnostic engine for running 10^4-10^6 registered, restartable
+  simulation campaigns over a rented GPU spot fleet. It provides a config-hashed
+  run registry with bit-identical restart from full-state checkpoints, streamed
+  event records with triggered full-field capture, probe-or-bail admission
+  control for flaky marketplace hosts, and leak-proof, teardown-verified cloud
+  brokers for Vast.ai, RunPod, and Modal. An engine plugs in a single injected
+  callable; nothing in the orchestration layer imports a model or a solver.
+keywords:
+  - campaign
+  - spot-instances
+  - checkpointing
+  - reproducibility
+  - provenance
+  - gpu
+  - vast-ai
+  - runpod
+  - modal
+  - jax
+license: MIT
+version: 0.1.0

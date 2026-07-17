@@ -1,0 +1,15 @@
+{
+  "title": "run-farm: checkpointed campaign runs over a rented GPU spot fleet",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {"name": "Galasyn, James P."},
+    {"name": "Théodore, Claude"}
+  ],
+  "description": "Checkpointed, config-hashed campaign runs over a rented GPU spot fleet: restart-exact registry, event records, probe-or-bail admission, and leak-proof cloud brokers (Vast/RunPod/Modal).",
+  "keywords": [
+    "campaign", "spot-instances", "checkpointing", "reproducibility",
+    "provenance", "gpu", "vast-ai", "runpod", "modal", "jax"
+  ]
+}

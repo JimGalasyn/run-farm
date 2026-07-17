@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.png
+.pytest_cache/
+dist/
+build/
+.coverage
+coverage.xml
+
+# run-farm scratch
+campaign_out/
+output/
+*.jsonl
