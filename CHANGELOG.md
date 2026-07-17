@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] — Downstream-extraction fixes
+
+Cut while extracting the campaign layer out of jax-solitons (its first real
+external consumer). No API changes; a correctness fix and coverage the port missed.
+
+### Fixed
+- **`FileRunRegistry.load` rebuilt checkpoints with the wrong config type.** It used
+  the default `SimpleRunConfig.from_json`, which raised `TypeError` on any engine
+  whose `RunConfig` has its own fields (jax-solitons' `model`/`N`/`L`). It now
+  rebuilds with the handle's own config type. Found by jax-solitons' bit-identical
+  resume test across the package seam — exactly what a downstream integration test
+  is for. Regression pinned in `tests/test_config.py`.
+
+### Added
+- Admission (E) and Provider-contract (F) tests migrated from jax-solitons'
+  `test_campaign.py` — ProbeAdmission's probe-or-bail gates and FakeProvider
+  teardown/failover — lifting `run_farm.reference` coverage the initial port left low.
+
+### Changed
+- Docs: "leak-proof" softened to **best-effort verified teardown** throughout, and a
+  README **Cost and liability** section added. The teardown contract cannot be a
+  guarantee — a SIGKILL or a crash in the create→track window can still orphan a
+  billing host (reap is the backstop) — and claiming otherwise alongside the MIT
+  no-liability clause was contradictory.
+
+
 ## [0.1.0] — Extraction from jax-solitons
 
 The initial release. run-farm is the campaign/GPU-farming layer extracted from

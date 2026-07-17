@@ -58,7 +58,12 @@ class FileRunRegistry:
         p = self._ckpt(handle)
         if not p.exists():
             return None
-        state, _config, step = load_checkpoint(p)
+        # Rebuild with the HANDLE's own config type, not the default: an engine
+        # with its own RunConfig shape (model/N/L, grid_size/verts_per_side) would
+        # make the default `SimpleRunConfig.from_json` choke on its fields. We
+        # discard the rebuilt config anyway (the caller has `handle.config`), but
+        # load_checkpoint reconstructs it, so it must reconstruct the right type.
+        state, _config, step = load_checkpoint(p, config_class=type(handle.config))
         return state, step
 
     def save(self, handle: RunHandle, state: State, step: int) -> None:

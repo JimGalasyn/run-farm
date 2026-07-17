@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "run-farm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Checkpointed, config-hashed campaign runs over a rented GPU spot fleet: restart-exact registry, event records, probe-or-bail admission, and leak-proof cloud brokers (Vast/RunPod/Modal)."
 readme = "README.md"
 license = { text = "MIT" }

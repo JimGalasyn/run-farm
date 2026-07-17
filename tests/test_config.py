@@ -100,3 +100,37 @@ def test_run_dir_writes_config_and_manifest(tmp_path):
     run_dir(tmp_path, cfg)
     rows2 = [x for x in (tmp_path / "MANIFEST.jsonl").read_text().splitlines() if x.strip()]
     assert len(rows2) == 1
+
+
+def test_registry_load_rebuilds_a_NON_default_config_type(tmp_path):
+    """Regression (found by the jax-solitons extraction): FileRunRegistry.load must
+    rebuild a checkpoint's config with the HANDLE's config type, not the default
+    SimpleRunConfig -- an engine whose config has extra fields (here `extra`) would
+    otherwise crash `SimpleRunConfig.from_json` with an unexpected-kwarg TypeError."""
+    import dataclasses, json, hashlib
+    import numpy as np
+    from run_farm.reference import FileRunRegistry
+
+    @dataclasses.dataclass(frozen=True)
+    class EngineConfig:               # a non-SimpleRunConfig shape (extra field)
+        name: str = "eng"
+        dtype: str = "float64"
+        extra: int = 7
+        params: dict = dataclasses.field(default_factory=dict)
+        def to_json(self):
+            return json.dumps(dataclasses.asdict(self), sort_keys=True)
+        @classmethod
+        def from_json(cls, s):
+            return cls(**json.loads(s))
+        def config_hash(self, n=12):
+            return hashlib.sha256(self.to_json().encode()).hexdigest()[:n]
+        def run_name(self):
+            return f"{self.name}_{self.config_hash()}"
+
+    reg = FileRunRegistry(str(tmp_path))
+    h = reg.register(EngineConfig(extra=99, params={"R": 2.0}))
+    reg.save(h, {"z": np.arange(4, dtype=np.float64)}, step=5)
+    got = reg.load(h)                 # must NOT raise (was: SimpleRunConfig TypeError)
+    assert got is not None
+    state, step = got
+    assert step == 5 and np.array_equal(np.asarray(state["z"]), np.arange(4))
