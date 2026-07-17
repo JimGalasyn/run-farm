@@ -1,5 +1,14 @@
 # run-farm
 
+[![CI](https://github.com/JimGalasyn/run-farm/actions/workflows/ci.yml/badge.svg)](https://github.com/JimGalasyn/run-farm/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/JimGalasyn/run-farm/branch/main/graph/badge.svg)](https://codecov.io/gh/JimGalasyn/run-farm)
+[![CodeQL](https://github.com/JimGalasyn/run-farm/actions/workflows/codeql.yml/badge.svg)](https://github.com/JimGalasyn/run-farm/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/JimGalasyn/run-farm?include_prereleases)](https://github.com/JimGalasyn/run-farm/releases)
+[![PyPI](https://img.shields.io/pypi/v/run-farm)](https://pypi.org/project/run-farm/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21419776.svg)](https://doi.org/10.5281/zenodo.21419776)
+[![Python](https://img.shields.io/pypi/pyversions/run-farm)](https://pypi.org/project/run-farm/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > **Status: alpha (0.1.x).** The API will change without notice until 1.0.
 
 **Checkpointed, config-hashed campaign runs over a rented GPU spot fleet.** You bring

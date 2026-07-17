@@ -30,3 +30,12 @@ keywords:
   - jax
 license: MIT
 version: 0.1.0
+date-released: "2026-07-17"
+doi: 10.5281/zenodo.21419776
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21419776
+    description: Concept DOI (resolves to the latest version)
+  - type: doi
+    value: 10.5281/zenodo.21419777
+    description: Version DOI (v0.1.0)
