@@ -10,12 +10,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **Status: alpha (0.1.x).** The API will change without notice until 1.0.
+>
+> **⚠ This tool spends real money.** It rents billable cloud GPUs on your accounts.
+> You are solely responsible for all charges it incurs. See
+> [Cost and liability](#cost-and-liability) before running a live campaign.
 
 **Checkpointed, config-hashed campaign runs over a rented GPU spot fleet.** You bring
 an engine (any `Callable[[RunConfig, RunContext], dict]`) and a config; run-farm gives
 you a restart-exact run registry, streamed event records, probe-or-bail admission on
-flaky marketplace hosts, and leak-proof, teardown-verified cloud brokers for Vast,
-RunPod, and Modal.
+flaky marketplace hosts, and cloud brokers for Vast, RunPod, and Modal that make a
+**best-effort** to tear down and verify every rented host.
 
 ## Why
 
@@ -31,10 +35,14 @@ full contract run-farm owns:
   measures a host before it runs work and bails on the ones that can't. Measured live:
   **58% of created instances never boot**, and probe-or-bail fails them over ~9× faster
   than waiting out a timeout -- so P9 is a cost feature, not just a correctness one.
-- **Leak-proof cloud brokers (P10).** A leaked GPU bills by the second. Every
-  `Provider.rent()` destroys its host on *every* exit and independently verifies it is
-  gone, raising on a leak. Verified live: **0 leaks across 34 rentals**, including
-  through SIGTERM.
+- **Teardown-verifying cloud brokers (P10).** A leaked GPU bills by the second. Every
+  `Provider.rent()` tears its host down on exit — normal, exception, or Ctrl-C — and
+  independently re-checks that it is gone, raising loudly if it can't confirm. This is
+  **best-effort, not a guarantee**: a hard kill (SIGKILL, power loss) or a crash in the
+  window between *creating* an instance and *tracking* it can still orphan a billing
+  host. Always run `run-farm-reap` after a campaign to catch strays, and set a
+  [budget cap](#cost-and-liability). In live testing the normal, exception, and SIGTERM
+  paths tore down cleanly; the create-window gap is real and is why reap exists.
 
 ## Install
 
@@ -73,7 +81,7 @@ pointing an expensive engine at it.
 | `config` | `SimpleRunConfig` + restart-exact checkpoint / run-directory helpers |
 | `driver` | the physics-blind `run_campaign` / `execute_config` |
 | `reference` | local-machine `FileRunRegistry`, `JsonlEventSink`, `ProbeAdmission` |
-| `vast`, `runpod` | reference `Provider` adapters (leak-proof, teardown-verified) |
+| `vast`, `runpod` | reference `Provider` adapters (best-effort teardown + verify) |
 | `provider_exec`, `fleet` | rent-a-box executors, with per-host failover |
 | `modal_exec` | serverless executor (needs `[modal]`) |
 | `store` | shared object-store registry/sink for cross-cloud campaigns (needs `[s3]`) |
@@ -90,10 +98,41 @@ pip install -e '.[test]'
 pytest -q -n auto --cov=run_farm
 ```
 
+## Cost and liability
+
+run-farm rents **real, billable** cloud instances on marketplaces like Vast.ai,
+RunPod, and Modal using **your** credentials. Running a campaign spends your money.
+**You are solely responsible for every charge it incurs, whatever the cause** —
+including bugs, crashes, network failures, marketplace misbehavior, orphaned or
+leaked instances, misconfiguration, or a campaign that simply costs more than you
+expected.
+
+The safety mechanisms are **best-effort, not guarantees**:
+
+- **Teardown** fires on normal, exception, and Ctrl-C exits and re-verifies the host
+  is gone — but a `SIGKILL`, a power loss, or a crash in the create→track window can
+  still leave a billing host alive. **Run `run-farm-reap` after every campaign** to
+  find and destroy strays.
+- **`CappedProvider`** refuses to *start* a rental once spend reaches the cap, but it
+  is a pre-rent gate, not a mid-rental tripwire: a rental already running can still
+  overshoot by its own runtime, and the cap depends on the ledger being accurate.
+- **`estimate()`** is an estimate. Real cost depends on host failure rates,
+  marketplace pricing, and how long your work actually runs — all of which vary.
+
+Recommended before any spend: set a `CappedProvider` cap, keep a `RentalLedger`,
+watch live burn with `run-farm-status`, and reap when done. None of this removes your
+responsibility for the bill.
+
+This software is provided under the MIT License **"as is", without warranty of any
+kind, and with no liability** to the authors for any damages — including money lost
+on live campaigns. See [`LICENSE`](LICENSE) for the controlling terms; this section
+is a plain-language summary, not a modification of them.
+
 ## Citing
 
 See [`CITATION.cff`](CITATION.cff).
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE). Note the warranty and liability disclaimers, which
+are load-bearing for a tool that spends money: see [Cost and liability](#cost-and-liability).

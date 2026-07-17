@@ -7,7 +7,7 @@ contracts (design note: docs/DESIGN.md):
   C    EventSink     event-records-not-fields + triggered full capture
   D    Executor      spot-fleet fan-out + preemption recovery (adopt SkyPilot/dstack)
   E    Admission     probe-or-bail on flaky marketplace hosts
-  F    Provider      pluggable cloud broker: offers + leak-proof, verified teardown
+  F    Provider      pluggable cloud broker: offers + best-effort verified teardown
 
 A 2026-06-12 literature sweep confirmed no library covers A/B/C/E -- host-probing
 admission (E) exists nowhere. The only thing an engine injects is a `RunFn`

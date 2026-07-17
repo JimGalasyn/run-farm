@@ -1,6 +1,6 @@
 """Reap orphaned Vast instances -- the "clean up my farm" button.
 
-The leak-proof ``rent()`` contract only protects the NORMAL exit path. A SIGKILL,
+The teardown-verify ``rent()`` contract only protects the exit paths it can intercept. A SIGKILL,
 a crash, or a teardown REST call that itself fails on a flaky resolver all leave
 GPUs billing by the second. This is the external recovery: list what's actually
 live (the v1 endpoint -- the cost-safety source of truth) and destroy it, with

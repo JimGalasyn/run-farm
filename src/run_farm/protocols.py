@@ -13,7 +13,7 @@ Contract letters map to DESIGN.md principles:
   C  EventSink     event-records-not-fields + triggered capture      (P6, P7)
   D  Executor      spot-fleet fan-out + preemption recovery          (adopted)
   E  Admission     probe-or-bail on flaky marketplace hosts          (P9)
-  F  Provider      pluggable cloud broker: offers + leak-proof rent   (P9, P10)
+  F  Provider      pluggable cloud broker: offers + teardown-verifying rent   (P9, P10)
 
 A and B/C/E are the unserved contract this package owns; D is delegated to a
 pluggable `Executor`. F is the second build-thin seam: the marketplace brokers
@@ -411,12 +411,21 @@ class Provider(Protocol):
 
       1. `offers(spec)` returns rentable hosts meeting the bar, cheapest first.
       2. `rent(offer, launch)` brings a host up and yields a `RentedHost`.
-      3. **`rent` is a context manager whose teardown is guaranteed and
-         verified** -- it destroys the host on EVERY exit (success, exception,
-         Ctrl-C) and independently confirms it is gone, raising on a leak. A
-         leaked GPU bills by the second; teardown is the contract, not an
-         implementation nicety. Adapters that cannot prove teardown do not
-         satisfy `Provider`.
+      3. **`rent` is a context manager that makes a BEST-EFFORT, VERIFIED
+         teardown** -- it destroys the host on every exit it can intercept
+         (success, exception, Ctrl-C/SIGTERM) and independently re-checks that it
+         is gone, raising loudly if it cannot confirm. A leaked GPU bills by the
+         second, so teardown is the contract, not an implementation nicety, and an
+         adapter that cannot verify teardown does not satisfy `Provider`.
+
+         This is best-effort, NOT a guarantee, and the gap is real: a `SIGKILL` or
+         power loss bypasses every handler, and a crash in the window between
+         *creating* an instance and *tracking* it can orphan a host the process
+         never recorded. `run_farm.reap` is the backstop for exactly these cases,
+         and the `RentalLedger` -- which records an instance at CREATE time, before
+         `rent` even returns -- is the record a sweep consults to find a host that
+         in-memory tracking missed. Callers spending real money should reap after a
+         campaign and cap spend with `run_farm.budget.CappedProvider`.
 
     `rent` raises `HostProbeFailed` when the host comes up unusable, so the
     executor can fail over; any other provider error propagates. `name`

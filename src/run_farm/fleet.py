@@ -28,7 +28,7 @@ robustness the farming session paid for is built in:
     whole-leg failure also recovers on relaunch;
   - **launch jitter** so N legs don't fire N simultaneous DNS lookups (#29);
   - **signal-safe teardown** (#24): a SIGTERM/SIGINT mid-run still destroys every
-    in-flight rental, a backstop to each `rent()`'s own leak-proof teardown;
+    in-flight rental, a backstop to each `rent()`'s own best-effort teardown;
   - **post-run reconciliation** (#48): `run()` sweeps any rental still tracked at
     the end (a teardown gap) before returning.
 
@@ -37,7 +37,7 @@ legs, and mid-leg WHEN `dead_reason` can confirm the death; a host that dies in 
 way `dead_reason` cannot detect surfaces as a `RUN_FAIL` recoverable by
 relaunch+resume, not by silent in-flight re-renting.
 
-Transient REST retry (#23) and the leak-proof teardown live in the Provider
+Transient REST retry (#23) and the best-effort teardown live in the Provider
 (`vast.py`), so they apply here for free.
 """
 
@@ -534,7 +534,7 @@ class FleetExecutor:
     def _signal_guard(self):
         """For the duration of `run()`, make SIGTERM/SIGINT tear down live
         rentals before unwinding -- the proactive half of orphan prevention
-        (#24), a backstop to each `rent()`'s own leak-proof teardown."""
+        (#24), a backstop to each `rent()`'s own best-effort teardown."""
         return _SignalGuard(self)
 
 

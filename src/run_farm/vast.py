@@ -1,7 +1,7 @@
 """The reference `Provider` (F): a direct Vast.ai HTTP broker (stdlib only).
 
 `VastProvider` implements the campaign `Provider` Protocol -- `offers(HostSpec)`
-and a leak-proof `rent(Offer, LaunchSpec)` -- so the campaign can rent Vast GPUs
+and a teardown-verifying `rent(Offer, LaunchSpec)` -- so the campaign can rent Vast GPUs
 behind the same seam any other cloud plugs into. It is also the worked example a
 new adapter (RunPod, TensorDock, EC2 spot) copies.
 
@@ -14,7 +14,7 @@ the endpoints that work -- **v1 for listing, v0 sub-resources for
 create/destroy/show/logs** -- with no third-party dependency (urllib only),
 which also means nothing to break when the SDK lags the API again.
 
-Cost safety is structural and IS the Provider contract: ``rent()`` ALWAYS
+Cost safety is the Provider contract, best-effort: ``rent()`` tries to
 destroys on exit (success, exception, or Ctrl-C) and then verifies via the
 independent v1 list endpoint that the instance is actually gone. A leaked GPU
 bills by the second.
@@ -192,7 +192,7 @@ class Instance:
 class VastProvider:
     """The reference `Provider` (F): a direct Vast.ai HTTP broker.
 
-    Implements the campaign `Provider` Protocol (`offers` + leak-proof `rent`)
+    Implements the campaign `Provider` Protocol (`offers` + teardown-verifying `rent`)
     so Vast plugs into the same seam as any other cloud, and is the worked
     example a new adapter copies. The lower-level lifecycle methods
     (`create`/`status`/`wait_running`/`logs`/`destroy`) are public for direct
@@ -351,7 +351,7 @@ class VastProvider:
     @contextlib.contextmanager
     def rent(self, offer: Offer, launch: LaunchSpec, *, timeout_s: float = 600):
         """Rent `offer`, wait until usable, yield a `RentedHost`, and ALWAYS
-        verify-teardown on exit -- the leak-proof contract every Provider owes.
+        verify-teardown on exit -- the teardown-verify contract every Provider owes.
 
         Destroys in a finally block on any exit -- normal, exception, or
         Ctrl-C (retried) -- then independently re-checks the v1 list. If the

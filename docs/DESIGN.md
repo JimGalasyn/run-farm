@@ -55,7 +55,7 @@ Two verified literature sweeps drive this:
 
 The `VastClient` started as one marketplace's thin client. It is now the
 reference implementation of a **`Provider` Protocol (F)** — `offers(HostSpec)`
-plus a leak-proof `rent(Offer, LaunchSpec)` — so a new cloud (RunPod pods,
+plus a teardown-verifying `rent(Offer, LaunchSpec)` — so a new cloud (RunPod pods,
 TensorDock, EC2 spot) is a ~150-line adapter against a fixed contract, not a
 fork of the orchestration. This is the same "build thin" call as D, applied
 once more: SkyPilot *adopts* the clouds whose providers work; F *owns* the thin
@@ -63,7 +63,7 @@ broker for the marketplaces whose providers are broken (P10).
 
 Two things make F a real contract and not just an interface:
 
-- **Leak-proof teardown is the invariant, not a nicety.** `rent` is a context
+- **Best-effort verified teardown is the invariant, not a nicety.** `rent` is a context
   manager that destroys the host on *every* exit and independently verifies it
   is gone, raising on a confirmed leak. An adapter that can't prove teardown
   doesn't satisfy `Provider`. The contract test drives this with a
@@ -112,7 +112,7 @@ have hard-coded, which is the point of building it:
   Agent (Cloudflare error 1010); any explicit UA clears it. Vast had no such
   filter. Encoded in `runpod._req`.
 
-The shared `Offer`/`RentedHost`/`HostSpec`/`LaunchSpec` types and the leak-proof
+The shared `Offer`/`RentedHost`/`HostSpec`/`LaunchSpec` types and the teardown-verifying
 `rent` contract needed **zero changes** to absorb all three — the seam was drawn
 right. Both adapters are stdlib-only (urllib) and CI-tested against a mocked
 HTTP layer (no spend); `offers()` was also validated live against each cloud's
@@ -145,7 +145,7 @@ Two remote executors consume this, one per cloud topology:
   offers, rent with **per-host failover** (`HostProbeFailed` → next offer), wait
   for the engine to come up (probe `import jax_solitons` over SSH, P9), run the
   `worker` CLI per config over SSH, sync artifacts back, and lean on the
-  Provider's leak-proof `rent()` for teardown. The principled generalization of
+  Provider's teardown-verifying `rent()` for teardown. The principled generalization of
   the hand-rolled `run_eps_fleet` driver. (v1 is single-host-sequential;
   multi-host parallel fan-out is a follow-up.)
 
@@ -183,7 +183,7 @@ on top of this.
 | C | `EventSink` | stream small per-run records; capture full fields only when triggered | P6, P7 |
 | D | `Executor` | fan out tasks over a fleet; recover from preemption (re-submit incomplete) | adopted |
 | E | `Admission` | probe a host's real compute+network capacity; bail loudly on bad hosts | P9 |
-| F | `Provider` | pluggable cloud broker: list offers, rent one, **leak-proof teardown** | P9, P10 |
+| F | `Provider` | pluggable cloud broker: list offers, rent one, **best-effort verified teardown** | P9, P10 |
 
 A/B already live in `runs.py` (`RunConfig.config_hash`, `save_checkpoint`,
 `load_checkpoint`) — they are *already physics-agnostic*. The campaign module
@@ -226,7 +226,7 @@ intended mapping, raises `NotImplementedError`); `vast.py` is the reference
 `Provider` (F). The local/reference path is **CI-gated** — the A/B/C/E contract is
 driven end to end over the physics-free RunFns in `run_farm.testing` (register →
 checkpoint-per-step → resume, bit-identical); the F contract is tested via a
-zero-spend `FakeProvider` (leak-proof teardown on success/exception/bad-host +
+zero-spend `FakeProvider` (best-effort teardown on success/exception/bad-host +
 failover); the shared remote core (`run_one`/`load_run_fn`) and `ProviderExecutor`
 (failover + teardown over a `FakeProvider`, mocked SSH) are CI-gated too. The
 `ModalExecutor` is validated by a live run (not CI — it needs Modal + a GPU), and

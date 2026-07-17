@@ -3,7 +3,7 @@
 The executor (D) that consumes the Provider seam: pull offers, rent a host with
 per-host **failover** (a bad host -> next offer), wait for the engine to come up,
 ship each config and run the campaign `worker` over SSH, sync the artifacts back,
-and rely on the Provider's leak-proof `rent()` for teardown. This is the
+and rely on the Provider's teardown-verifying `rent()` for teardown. This is the
 principled generalization of the hand-rolled `run_eps_fleet` driver -- it works
 over `VastProvider`, `RunPodProvider`, or any future `Provider`.
 
@@ -255,7 +255,7 @@ class ProviderExecutor:
         as per-config errors. The failover walk is capped at `max_attempts` offers
         so a marketplace of marginal hosts can't grind for days (#48).
 
-        Teardown is the Provider's leak-proof `rent()` invariant -- it fires on
+        Teardown is the Provider's teardown-verifying `rent()` invariant -- it fires on
         every exit, including the failover `continue` and any exception here.
 
         `admission` is enforced structurally here -- by the Provider's

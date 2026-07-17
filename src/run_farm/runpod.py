@@ -1,7 +1,7 @@
 """A second reference `Provider` (F): a direct RunPod broker (stdlib only).
 
 `RunPodProvider` is the rule-of-three test of the `Provider` Protocol -- a
-second cloud behind the same `offers` + leak-proof `rent` seam, proving the
+second cloud behind the same `offers` + teardown-verifying `rent` seam, proving the
 abstraction wasn't shaped to one marketplace. It also documents, in code, the
 two ways RunPod differs from Vast that the Protocol had to absorb:
 
@@ -330,7 +330,7 @@ class RunPodProvider:
     @contextlib.contextmanager
     def rent(self, offer: Offer, launch: LaunchSpec, *, timeout_s: float = 600):
         """Place a pod of `offer`'s type, wait until SSH-ready, yield a
-        `RentedHost`, and ALWAYS terminate+verify on exit -- the leak-proof
+        `RentedHost`, and terminate+verify on every exit it can intercept -- the teardown-verify
         contract every Provider owes. Raises `HostProbeFailed` if the pod never
         comes up usable, so the executor can fail over to the next offer."""
         t0 = time.monotonic()
