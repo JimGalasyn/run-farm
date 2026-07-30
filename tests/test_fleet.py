@@ -593,3 +593,86 @@ def test_non_resumable_leg_neither_restores_nor_background_fetches(
     leg = _leg("L1", fetch="out", done_when="out/manifest.json")
     _exec(FakeProvider([_offer("a")]), tmp_path).run([leg])
     assert called == []                                    # _restore never invoked
+
+
+# -- staged fetch: a completion marker is the LAST thing published --------------
+
+def test_fetch_dying_midway_leaves_no_marker_so_resume_reruns(patched, tmp_path,
+                                                              monkeypatch):
+    """A marker with no payload behind it would pre-skip an incomplete leg FOREVER.
+
+    `scp -r` lands files in arbitrary order and the done_when marker is one of them.
+    Straight into leg_dir, a fetch that writes the marker and then dies leaves a leg
+    dir that `_complete()` reads as done -- so every future relaunch SKIPs a leg that
+    never finished, silently. Fetching into staging and publishing the marker last
+    makes the marker's presence imply the payload's.
+    """
+    import os
+
+    def scp_marker_then_die(key, host, port, remote, dst):
+        base = os.path.join(dst, os.path.basename(remote))
+        os.makedirs(base, exist_ok=True)
+        open(os.path.join(base, "manifest.json"), "w").write("{}")   # marker FIRST
+        raise OSError("connection dropped mid-fetch")                # ... then die
+
+    monkeypatch.setattr(fleet, "_scp_down", scp_marker_then_die)
+    patched(ready=True)
+    ex = _exec(FakeProvider([_offer("a")]), tmp_path)
+    leg = _leg("L1", fetch="out_kick", done_when="out_kick/manifest.json")
+
+    with pytest.raises(OSError):
+        ex._fetch(RentedHost(id="i", ssh_host="h", ssh_port=22, offer=_offer("a")), leg)
+
+    assert not (tmp_path / "L1" / "out_kick" / "manifest.json").exists(), \
+        "a torn fetch must not leave a completion marker"
+    assert not ex._complete(leg), "so the leg re-runs on relaunch instead of skipping"
+    assert not list(tmp_path.glob(".*fetching")), "staging cleaned up"
+
+
+def test_fetch_publishes_marker_after_payload(patched, tmp_path, monkeypatch):
+    """The positive half: a complete fetch lands everything, marker last."""
+    import os
+    order = []
+
+    def scp(key, host, port, remote, dst):
+        base = os.path.join(dst, os.path.basename(remote))
+        os.makedirs(base, exist_ok=True)
+        open(os.path.join(base, "manifest.json"), "w").write("{}")
+        open(os.path.join(base, "field.bin"), "wb").write(b"payload")
+        return (0, "")
+
+    real_replace = os.replace
+    monkeypatch.setattr(fleet, "_scp_down", scp)
+    monkeypatch.setattr("run_farm.arrival.os.replace",
+                        lambda s, d: (order.append(os.path.basename(d)),
+                                      real_replace(s, d))[1])
+    patched(ready=True)
+    leg = _leg("L1", fetch="out_kick", done_when="out_kick/manifest.json")
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([leg])
+
+    assert r.status == "OK"
+    assert (tmp_path / "L1" / "out_kick" / "field.bin").read_bytes() == b"payload"
+    assert order[-1] == "manifest.json", f"marker must be published last: {order}"
+
+
+def test_damaged_arrival_is_logged_not_silently_dropped(patched, tmp_path,
+                                                        monkeypatch):
+    """A corrupt artifact you can inspect beats one silently discarded -- and the
+    tear must be *reported*, since that is the failure that went unnoticed."""
+    import os
+    logged = []
+
+    def scp(key, host, port, remote, dst):
+        base = os.path.join(dst, os.path.basename(remote))
+        os.makedirs(base, exist_ok=True)
+        open(os.path.join(base, "field.npz"), "wb").write(b"PK\x03\x04truncated")
+        return (0, "")
+
+    monkeypatch.setattr(fleet, "_scp_down", scp)
+    patched(ready=True)
+    ex = _exec(FakeProvider([_offer("a")]), tmp_path)
+    ex._log = logged.append
+    [r] = ex.run([_leg("L1", fetch="out_kick")])
+
+    assert (tmp_path / "L1" / "out_kick" / "field.npz").exists(), "kept for inspection"
+    assert any("arrived damaged" in m and "truncated" in m for m in logged), logged

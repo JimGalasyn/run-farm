@@ -1,7 +1,8 @@
 # Releasing
 
-1. Bump `version` in `pyproject.toml`, `src/run_farm/__init__.py`, and
-   `CITATION.cff` (keep them in sync).
+1. Bump `version` in `pyproject.toml` and `CITATION.cff` (keep them in sync).
+   `src/run_farm/__init__.py` carries no `__version__` — do not add one without
+   also wiring it into this list.
 2. Commit, tag `vX.Y.Z`, push the tag.
 3. Publish a GitHub Release for the tag — this triggers
    `.github/workflows/publish-pypi.yml` (OIDC trusted publishing to PyPI).

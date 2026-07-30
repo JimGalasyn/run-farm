@@ -60,6 +60,30 @@ from run_farm.fleet import (
     parse_progress_line,
 )
 from run_farm.status import fleet_status
+from run_farm.payload import PayloadError, PayloadSpec, require_flat, validate_flat
+from run_farm.preflight import (
+    CheckResult,
+    OffersAvailable,
+    OutDirWritable,
+    PayloadClosed,
+    PreflightError,
+    ProviderCapable,
+    ResumeMarkersIntended,
+    SshHandshake,
+    SshKeyPresent,
+    SshKeyRegistered,
+    gauntlet,
+    require,
+    standard_gauntlet,
+)
+from run_farm.diagnostics import Diagnostics, Gap, capabilities, collect, explain_failure
+from run_farm.arrival import (
+    ArrivalProblem,
+    atomic_write,
+    publish,
+    verify_file,
+    verify_tree,
+)
 from run_farm.remote import load_run_fn, run_one
 from run_farm.store import (
     BlobStore,
@@ -124,6 +148,16 @@ __all__ = [
     "legs", "estimate", "CappedProvider", "BudgetExceeded",
     # physics-free RunFns for smoke-testing a fleet with no engine
     "testing",
+    # payload closure: does what you SHIP run where it LANDS (free, local)
+    "PayloadSpec", "validate_flat", "require_flat", "PayloadError",
+    # preflight gauntlet: everything that can fail BEFORE money is spent
+    "CheckResult", "PreflightError", "gauntlet", "require", "standard_gauntlet",
+    "SshKeyPresent", "SshKeyRegistered", "SshHandshake", "PayloadClosed",
+    "OffersAvailable", "OutDirWritable", "ResumeMarkersIntended", "ProviderCapable",
+    # provider diagnostics, with the GAPS named rather than silent
+    "Diagnostics", "Gap", "capabilities", "collect", "explain_failure",
+    # artifact arrival: verify what landed, publish so nothing sees it partial
+    "ArrivalProblem", "verify_file", "verify_tree", "publish", "atomic_write",
     # governed campaign: policy over mechanism (preflight, launch gate,
     # shipment/SHA verification, cut-flow, ingest) — domain policy injected
     "FarmCampaign", "CutFlow", "launch_gate", "verify_shipment",

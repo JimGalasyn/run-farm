@@ -47,6 +47,7 @@ import concurrent.futures as cf
 import dataclasses
 import os
 import shlex
+import shutil
 import signal
 import threading
 import time
@@ -54,6 +55,7 @@ from collections import deque
 from collections.abc import Iterable
 from pathlib import Path
 
+from run_farm.arrival import publish
 from run_farm.protocols import (
     HostProbeFailed,
     HostSpec,
@@ -325,7 +327,32 @@ class FleetExecutor:
         remote = remote.rstrip("/")
         leg_dir = self._leg_dir(leg)
         leg_dir.mkdir(parents=True, exist_ok=True)
-        _scp_down(self.key_path, host.ssh_host, host.ssh_port, remote, str(leg_dir))
+
+        # Fetch into a STAGING dir, then publish with the done_when marker moved last
+        # (#48 follow-up). Straight into leg_dir, `scp -r` lands files in arbitrary
+        # order and the marker is one of them: if the marker arrives first and the
+        # process dies mid-fetch, leg_dir holds a marker with no payload -- and
+        # `_complete()` then PRE-SKIPS an incomplete leg on every future relaunch,
+        # silently. Staging makes the marker's presence imply the payload's.
+        # This also protects a `resumable` leg's mid-run pulls, where an outside
+        # reader can observe leg_dir at any instant.
+        # Unique per call: a `resumable` leg's mid-run fetcher thread may still be
+        # alive when the final fetch runs (fetcher.join has a 30 s timeout), and two
+        # scp's sharing one staging dir would interleave into a mixed publish.
+        staging = leg_dir.parent / (f".{leg_dir.name}.fetching."
+                                    f"{os.getpid()}.{threading.get_ident()}")
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        try:
+            _scp_down(self.key_path, host.ssh_host, host.ssh_port, remote,
+                      str(staging))
+            problems = publish(staging, leg_dir, marker=leg.marker())
+            for p in problems:
+                # Do not raise: a corrupt artifact you can inspect beats one silently
+                # dropped, and the leg's own marker check decides OK vs NO_RESULT.
+                self._log(f"  {leg.label}: arrived damaged -- {p}")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     # -- resume transport (resumable legs) -----------------------------------
     def _restore(self, host: RentedHost, leg: FleetLeg) -> None:
