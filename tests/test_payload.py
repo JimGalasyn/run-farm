@@ -2,7 +2,7 @@
 
 These are written as NEGATIVE CONTROLS first: every test that asserts the validator
 passes is paired with one that breaks the payload in the specific way a real campaign
-broke it and asserts the validator FAILS. A preflight suite whose checks cannot fail
+broke it and asserts the validator FAILS. A launch-gauntlet suite whose checks cannot fail
 is decoration, and that is exactly how three of the original failures got past their
 own verification.
 """

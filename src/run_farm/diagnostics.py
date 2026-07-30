@@ -96,7 +96,7 @@ def _try(field: str, fn, gaps: list[Gap], *args, **kw):
 def capabilities(provider) -> dict[str, bool]:
     """Which diagnostic capabilities this provider actually exposes.
 
-    Call it at launch (see `preflight.ProviderCapable`) so a thin provider is a known
+    Call it at launch (see `gauntlet.ProviderCapable`) so a thin provider is a known
     condition rather than a surprise three hours into a run."""
     return {m: callable(getattr(provider, m, None))
             for m in ("status", "dead_reason", "logs", "list_instances", "destroy")}

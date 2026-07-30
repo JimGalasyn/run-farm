@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/run-farm)](https://pypi.org/project/run-farm/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Status: alpha (0.1.x).** The API will change without notice until 1.0.
+> **Status: alpha (0.2.x).** The API will change without notice until 1.0.
 >
 > **⚠ This tool spends real money.** It rents billable cloud GPUs on your accounts.
 > You are solely responsible for all charges it incurs. See
@@ -91,36 +91,41 @@ pointing an expensive engine at it.
 | `reap` | destroy orphaned instances (scoped, refuses unsafe sweeps) |
 | `testing` | physics-free RunFns for engine-less smoke tests |
 | `payload` | does what you SHIP run where it LANDS? flat-layout validation, locally |
-| `preflight` | the launch gauntlet -- everything that can fail before money is spent |
+| `gauntlet` | the launch gauntlet -- everything that can fail before money is spent |
 | `diagnostics` | uniform host diagnostics, with provider capability GAPS named |
 | `arrival` | verify fetched artifacts; publish so a marker never precedes its payload |
 
-## Preflight: fail locally, not on a rented box
+## The launch gauntlet: fail locally, not on a rented box
 
 Campaign failures are rarely physics. They are a key that was never registered, a
 payload one file short, a stale marker that made a skipped leg read as a passing one.
 Each is free to detect locally, and each has instead been detected by renting GPUs.
 
 ```python
-from run_farm import PayloadSpec, standard_gauntlet, require
+from run_farm import PayloadSpec, standard_gauntlet, require_gauntlet
 
-require(standard_gauntlet(
+require_gauntlet(standard_gauntlet(
     provider=provider, host_spec=spec, out_dir="out/", legs=legs,
     key_path="~/.ssh/vastai",
     payload=PayloadSpec(
         files=SHIP, imports=("standard_box", "core_knot_id"),
         startup="import standard_box as sb; print(sb.engine_sha()[0])",
         env=(("ENGINE_COMMIT", commit),), expect=local_sha),
-))                       # raises PreflightError listing EVERY blocker, before renting
+))                       # raises GauntletError listing EVERY blocker, before renting
 ```
 
 The governing rule, learned expensively: **every check must be able to fail. If it
 cannot, it is not a check.** A Vast API call once stood in for an SSH test — the key
 was fine, `~/.ssh/vastai` did not exist, and 7 rentals over 72 minutes each looked
 like a bad host. So every `CheckResult` carries `proves`: what a green result
-establishes, and what it does not. `preflight` cannot prove SSH works (that needs a
+establishes, and what it does not. The gauntlet cannot prove SSH works (that needs a
 host, and a host costs money); it says so, and `SshHandshake` covers the rest once you
 hold one.
+
+Named `gauntlet`, not `preflight`, on purpose: `FarmCampaign(preflight=...)` is a
+different layer — the injected *domain envelope* on a config dict ("can this
+configuration hold?"), where this is the local launch environment. Neither
+substitutes for the other.
 
 Related, same principle: `diagnostics.collect` distinguishes "the host produced no
 logs" from "this provider has no `logs()` to ask" — a monitor once called a method

@@ -1,4 +1,4 @@
-"""Preflight: everything that can fail BEFORE any money is spent.
+"""The launch gauntlet: everything that can fail BEFORE any money is spent.
 
 A campaign's expensive failures are almost never physics. They are a missing local
 file, a key that was never registered, a payload one file short, a stale marker that
@@ -16,7 +16,7 @@ That is why `CheckResult` carries `proves`: a passing check must state what its 
 result actually establishes, and what it does NOT. A check that cannot articulate the
 difference is the API-call-for-SSH-test mistake waiting to happen again.
 
-What preflight can and cannot do, stated plainly:
+What the gauntlet can and cannot do, stated plainly:
 
   CAN   prove a key file exists and is offerable, that its fingerprint is registered
         with the provider, that the payload runs when flattened, that the marketplace
@@ -28,20 +28,24 @@ What preflight can and cannot do, stated plainly:
         the 72-minute failure. Use `SshHandshake` once you actually hold a host (a
         smoke leg) for the rest.
 
-Not to be confused with `FarmCampaign(preflight=...)`, which is a different layer and
-runs on a different object:
+This module is deliberately NOT called `preflight`. That word is already taken, by a
+different layer that runs on a different object, and conflating them would be the kind
+of confusion that hides a skipped check:
 
-  this module                  the LOCAL LAUNCH ENVIRONMENT. Is the key there, does
+  `gauntlet` (here)            the LOCAL LAUNCH ENVIRONMENT. Is the key there, does
                                the payload run flat, has the provider capacity, will
                                a leg skip when you did not mean it to. Knows nothing
                                about physics.
-  FarmCampaign(preflight=...)  the DOMAIN ENVELOPE, injected per engine, run against
+  `FarmCampaign(preflight=)`   the DOMAIN ENVELOPE, injected per engine, run against
                                a config dict: can this configuration hold at all?
                                ("don't pay for a config that can't hold.")
+  `farm.launch_gate`           COMPLETENESS: the launched config-hash set equals the
+                               planned one, so no leg was silently dropped.
 
-Both run before renting and neither substitutes for the other: a physically sound
-config still fails at `exit=1` if the payload is a file short, and a perfectly
-closed payload still wastes a rental computing a config outside its envelope.
+All three run around launch and none substitutes for another: a physically sound
+config still fails at `exit=1` if the payload is a file short, a perfectly closed
+payload still wastes a rental computing a config outside its envelope, and both can
+be fine while a third of the legs never launched at all.
 """
 
 from __future__ import annotations
@@ -60,7 +64,7 @@ from run_farm.payload import PayloadSpec, validate_flat
 
 @dataclasses.dataclass(frozen=True)
 class CheckResult:
-    """The outcome of one preflight check.
+    """The outcome of one gauntlet check.
 
     name    short stable id, e.g. "ssh-key-present"
     ok      did it pass
@@ -87,19 +91,19 @@ class CheckResult:
         return f"[{mark}] {self.name}: {self.detail}"
 
 
-class PreflightError(RuntimeError):
-    """Raised by `require` when a fatal check failed. Carries every result, not
-    just the first failure, so one run of preflight surfaces every blocker."""
+class GauntletError(RuntimeError):
+    """Raised by `require_gauntlet` when a fatal check failed. Carries every result,
+    not just the first failure, so ONE local run surfaces every blocker."""
 
     def __init__(self, results: Sequence[CheckResult]):
         self.results = list(results)
         self.blocking = [r for r in self.results if r.blocking]
         super().__init__(
-            f"{len(self.blocking)} preflight check(s) blocked launch:\n  "
+            f"{len(self.blocking)} gauntlet check(s) blocked launch:\n  "
             + "\n  ".join(str(r) for r in self.blocking))
 
 
-def gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
+def run_gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
     """Run every check, in order, and return all results.
 
     Does NOT stop at the first failure and does NOT raise: the point is to spend one
@@ -123,11 +127,11 @@ def gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
     return results
 
 
-def require(checks: Iterable, *, log=print) -> list[CheckResult]:
-    """`gauntlet`, but raise `PreflightError` if anything fatal failed."""
-    results = gauntlet(checks, log=log)
+def require_gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
+    """`run_gauntlet`, but raise `GauntletError` if anything fatal failed."""
+    results = run_gauntlet(checks, log=log)
     if any(r.blocking for r in results):
-        raise PreflightError(results)
+        raise GauntletError(results)
     return results
 
 

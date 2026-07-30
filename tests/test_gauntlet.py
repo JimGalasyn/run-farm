@@ -1,4 +1,4 @@
-"""The preflight gauntlet.
+"""The launch gauntlet.
 
 The load-bearing test in this file is
 `test_missing_ssh_key_is_caught_before_any_rental`: that is the 7-rental, 72-minute
@@ -13,11 +13,11 @@ from pathlib import Path
 import pytest
 
 from run_farm.payload import PayloadSpec
-from run_farm.preflight import (CheckResult, OffersAvailable, OutDirWritable,
-                                PayloadClosed, PreflightError, ProviderCapable,
-                                ResumeMarkersIntended, SshKeyPresent,
-                                SshKeyRegistered, gauntlet, require,
-                                standard_gauntlet)
+from run_farm.gauntlet import (CheckResult, GauntletError, OffersAvailable,
+                               OutDirWritable, PayloadClosed, ProviderCapable,
+                               ResumeMarkersIntended, SshKeyPresent,
+                               SshKeyRegistered, require_gauntlet, run_gauntlet,
+                               standard_gauntlet)
 from run_farm.protocols import HostSpec, Offer
 
 
@@ -44,7 +44,7 @@ class FakeProvider:
         return list(self._offers)
 
     def rent(self, offer, launch, *, timeout_s=600):     # pragma: no cover
-        raise AssertionError("preflight must never rent")
+        raise AssertionError("the gauntlet must never rent")
 
     def destroy(self, host_id):                          # pragma: no cover
         pass
@@ -202,7 +202,7 @@ def test_absent_optional_method_is_a_pass_but_names_the_degradation():
 
 # ------------------------------------------------------------------ gauntlet
 def test_gauntlet_reports_every_failure_not_just_the_first(tmp_path):
-    results = gauntlet([SshKeyPresent(str(tmp_path / "nope")),
+    results = run_gauntlet([SshKeyPresent(str(tmp_path / "nope")),
                         PayloadClosed(PayloadSpec(files=(tmp_path / "gone.py",))),
                         OffersAvailable(FakeProvider([]), HostSpec())], log=None)
     assert len(results) == 3 and all(not r.ok for r in results)
@@ -215,7 +215,7 @@ def test_a_check_that_RAISES_is_reported_as_a_failure(tmp_path):
         raise RuntimeError("check is broken")
     exploding.name = "exploding"
 
-    [r] = gauntlet([exploding], log=None)
+    [r] = run_gauntlet([exploding], log=None)
     assert not r.ok and "the CHECK ITSELF raised" in r.detail
 
 
@@ -224,14 +224,14 @@ def test_require_raises_with_all_blockers_and_ignores_warnings(tmp_path):
     (tmp_path / "L1").mkdir()
     (tmp_path / "L1" / "m.json").write_text("{}")
 
-    with pytest.raises(PreflightError) as ei:
-        require([SshKeyPresent(str(tmp_path / "nope")),
+    with pytest.raises(GauntletError) as ei:
+        require_gauntlet([SshKeyPresent(str(tmp_path / "nope")),
                  ResumeMarkersIntended([_Leg("L1", "m.json")], tmp_path)], log=None)
     assert len(ei.value.blocking) == 1, "the non-fatal warning must not block"
     assert len(ei.value.results) == 2, "but it is still reported"
 
     # negative control: all-passing checks do not raise
-    require([SshKeyPresent(str(key)), OutDirWritable(tmp_path / "o")], log=None)
+    require_gauntlet([SshKeyPresent(str(key)), OutDirWritable(tmp_path / "o")], log=None)
 
 
 def test_standard_gauntlet_is_ordered_cheapest_first_and_honours_skip(tmp_path):
@@ -256,7 +256,7 @@ def test_standard_gauntlet_end_to_end_passes_on_a_sound_setup(tmp_path):
     (tmp_path / "entry.py").write_text("VALUE = 1\n")
     prov = FakeProvider([_offer("a")], keys=[key.with_suffix(".pub").read_text()])
 
-    results = require(standard_gauntlet(
+    results = require_gauntlet(standard_gauntlet(
         provider=prov, host_spec=HostSpec(), out_dir=tmp_path / "out",
         key_path=str(key),
         payload=PayloadSpec(files=(tmp_path / "entry.py",), imports=("entry",)),

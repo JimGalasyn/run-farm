@@ -61,19 +61,19 @@ from run_farm.fleet import (
 )
 from run_farm.status import fleet_status
 from run_farm.payload import PayloadError, PayloadSpec, require_flat, validate_flat
-from run_farm.preflight import (
+from run_farm.gauntlet import (
     CheckResult,
+    GauntletError,
     OffersAvailable,
     OutDirWritable,
     PayloadClosed,
-    PreflightError,
     ProviderCapable,
     ResumeMarkersIntended,
     SshHandshake,
     SshKeyPresent,
     SshKeyRegistered,
-    gauntlet,
-    require,
+    require_gauntlet,
+    run_gauntlet,
     standard_gauntlet,
 )
 from run_farm.diagnostics import Diagnostics, Gap, capabilities, collect, explain_failure
@@ -150,8 +150,11 @@ __all__ = [
     "testing",
     # payload closure: does what you SHIP run where it LANDS (free, local)
     "PayloadSpec", "validate_flat", "require_flat", "PayloadError",
-    # preflight gauntlet: everything that can fail BEFORE money is spent
-    "CheckResult", "PreflightError", "gauntlet", "require", "standard_gauntlet",
+    # the launch gauntlet: everything that can fail BEFORE money is spent.
+    # NB distinct from FarmCampaign(preflight=...) -- that is the injected DOMAIN
+    # envelope on a config; this is the local launch environment.
+    "CheckResult", "GauntletError", "run_gauntlet", "require_gauntlet",
+    "standard_gauntlet",
     "SshKeyPresent", "SshKeyRegistered", "SshHandshake", "PayloadClosed",
     "OffersAvailable", "OutDirWritable", "ResumeMarkersIntended", "ProviderCapable",
     # provider diagnostics, with the GAPS named rather than silent
