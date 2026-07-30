@@ -64,6 +64,10 @@ packages = ["src/run_farm"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Without this, a `run_farm` already installed in the active venv shadows this
+# checkout and the tests silently exercise the INSTALLED copy -- so an edit here
+# can appear to have no effect, or a new module can appear not to exist at all.
+pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["run_farm"]
