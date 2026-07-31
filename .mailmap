@@ -1,0 +1,28 @@
+# Canonical identities for git log / shortlog / blame.
+#
+# Unlike the sibling repos (jax-solitons, jax-morpho, Morphospace), no work address
+# has ever landed here: all 9 commits as of 2026-07-31 are authored AND committed as
+# jim.galasyn@hotmail.com. This repo was created after the personal identity moved
+# into a URL-conditional include (~/.gitconfig-personal, keyed on the
+# github.com/JimGalasyn remote rather than on a path, so it survives a fresh clone
+# anywhere on disk).
+#
+# So only one of the two lines below fixes anything today:
+#
+#   * The NAME split is real: "Jim" (5 commits) and "Jim Galasyn" (4) are the same
+#     person, and `git shortlog -sne` reported two authors before this file existed.
+#     The second line collapses them.
+#   * The confluent.io line is PRECAUTIONARY, not corrective. The GitHub account's
+#     public email is still jim.galasyn@confluent.io, and GitHub's squash-merge
+#     re-attributes the merged commit to the ACCOUNT email rather than to the branch
+#     commit's author. This repo lands direct commits on main today, so it has not
+#     happened — the line is here so the first squash-merged PR does not silently
+#     introduce a second author.
+#
+# Counts above are a snapshot; recompute with
+#   git log --format='%an <%ae>' | sort | uniq -c
+#
+# Format: Proper Name <proper@email> <commit@email>
+
+Jim Galasyn <jim.galasyn@hotmail.com> <jim.galasyn@confluent.io>
+Jim Galasyn <jim.galasyn@hotmail.com> <jim.galasyn@hotmail.com>
