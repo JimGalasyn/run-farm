@@ -78,10 +78,15 @@ def test_verify_tree_flags_required_absent_and_tmp_residue(tmp_path):
 # ------------------------------------------------- the publication contract
 def test_marker_is_published_last(tmp_path):
     """THE contract. A completion marker must be the last byte written, or it is not
-    a completion marker."""
+    a completion marker.
+
+    `zz_field.npz` sorts AFTER `manifest.json` on purpose. `publish` walks a sorted
+    listing, so a payload named `field.npz` would leave the marker last with the
+    ordering code deleted -- the test would pin `sorted()`, not the contract.
+    """
     staging, dest = tmp_path / "stage", tmp_path / "dest"
     staging.mkdir()
-    _npz(staging / "field.npz")
+    _npz(staging / "zz_field.npz")
     (staging / "manifest.json").write_text("{}")
 
     order = []
@@ -99,17 +104,22 @@ def test_marker_is_published_last(tmp_path):
         arrival.os.replace = orig
 
     assert order[-1] == "manifest.json", f"marker not last: {order}"
-    assert (dest / "field.npz").exists() and (dest / "manifest.json").exists()
+    assert (dest / "zz_field.npz").exists() and (dest / "manifest.json").exists()
 
 
 def test_marker_inside_a_fetched_dir_is_still_published_last(tmp_path):
     """done_when="out_kick/manifest.json": the marker is nested, so the whole
-    directory it lives in must go last, and within it the marker last again."""
+    directory it lives in must go last, and within it the marker last again.
+
+    Both names sort AFTER what must follow them (`zz_other.txt` after `out_kick`,
+    `zz_field.npz` after `manifest.json`), so neither assertion can be satisfied by
+    alphabetical luck -- delete either ordering site and this fails.
+    """
     staging, dest = tmp_path / "stage", tmp_path / "dest"
     (staging / "out_kick").mkdir(parents=True)
-    _npz(staging / "out_kick" / "field.npz")
+    _npz(staging / "out_kick" / "zz_field.npz")
     (staging / "out_kick" / "manifest.json").write_text("{}")
-    (staging / "other.txt").write_text("x")
+    (staging / "zz_other.txt").write_text("x")
 
     order = []
     import run_farm.arrival as arrival
@@ -120,7 +130,7 @@ def test_marker_inside_a_fetched_dir_is_still_published_last(tmp_path):
     finally:
         arrival.os.replace = real
     assert order[-1] == "manifest.json", order
-    assert order.index("other.txt") < order.index("manifest.json")
+    assert order.index("zz_other.txt") < order.index("manifest.json")
 
 
 def test_publish_reports_damage_without_dropping_the_file(tmp_path):

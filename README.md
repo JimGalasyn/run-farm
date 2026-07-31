@@ -131,7 +131,12 @@ Related, same principle: `diagnostics.collect` distinguishes "the host produced 
 logs" from "this provider has no `logs()` to ask" — a monitor once called a method
 that does not exist with stderr suppressed, and silence read as health. And
 `arrival.verify_file` **opens** artifacts, because a truncated 86 MB `.npz` had a
-plausible size and correct magic bytes and failed only on open.
+plausible size and correct magic bytes and failed only on open — and for zip-family
+files it CRC-checks the members, since a flipped payload byte leaves the central
+directory intact and a bare `ZipFile(p)` succeeds. `arrival.verify_report` counts what
+it could NOT check (`.bin`, `.pt`, anything with no internal checksum) as
+`unverifiable` rather than folding it into the pass. `FleetExecutor` gates on this:
+a leg whose payload did not survive the trip reports `BAD_ARTIFACTS`, not `OK`.
 
 ## Development
 

@@ -79,9 +79,11 @@ from run_farm.gauntlet import (
 from run_farm.diagnostics import Diagnostics, Gap, capabilities, collect, explain_failure
 from run_farm.arrival import (
     ArrivalProblem,
+    ArrivalReport,
     atomic_write,
     publish,
     verify_file,
+    verify_report,
     verify_tree,
 )
 from run_farm.remote import load_run_fn, run_one
@@ -160,7 +162,8 @@ __all__ = [
     # provider diagnostics, with the GAPS named rather than silent
     "Diagnostics", "Gap", "capabilities", "collect", "explain_failure",
     # artifact arrival: verify what landed, publish so nothing sees it partial
-    "ArrivalProblem", "verify_file", "verify_tree", "publish", "atomic_write",
+    "ArrivalProblem", "ArrivalReport", "verify_file", "verify_tree",
+    "verify_report", "publish", "atomic_write",
     # governed campaign: policy over mechanism (preflight, launch gate,
     # shipment/SHA verification, cut-flow, ingest) — domain policy injected
     "FarmCampaign", "CutFlow", "launch_gate", "verify_shipment",

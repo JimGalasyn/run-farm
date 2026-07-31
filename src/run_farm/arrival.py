@@ -9,6 +9,19 @@ copied by a fetcher polling every 120 s while the writer was still writing. It w
 reported as banked on the strength of a directory listing. So: *do not claim a file is
 good from a directory listing.* `verify_file` OPENS things.
 
+For zip-family members that means CRC32, not a successful open. The distinction is
+load-bearing, because the lazy readers callers actually use do not read member data
+at all:
+
+    corruption            zipfile.ZipFile(p)   testzip()
+    truncated prefix      BadZipFile           BadZipFile
+    flipped payload byte  SUCCEEDS             BAD: <member>
+
+Coverage is honest about its own limits. Opaque formats (`.bin`, `.pt`, anything with
+no verifier) carry no internal checksum, so nothing here can vouch for them; they are
+counted `unverifiable` and reported as such. A report reading "all clear" over a
+directory of opaque blobs would be the same overclaim in a different costume.
+
 **Publication.** The same bug, in the other medium, in run-farm's own fetch path.
 `scp -r` copies into the live leg directory in whatever order it likes, and a leg's
 `done_when` marker is one of those files. If the marker lands before the payload and
@@ -29,30 +42,46 @@ A shipment can verify perfectly while the artifact it points at is torn.
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import json
 import os
 import shutil
+import tarfile
 import zipfile
+import zlib
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+
+# Suffixes that mean "a write was in progress here". Their presence is evidence of an
+# interrupted save, not damage in itself -- an atomic writer leaves exactly this behind
+# when it dies, with the real file untouched. Surfaced, never fatal.
+RESIDUE_SUFFIXES = (".tmp", ".part", ".partial", ".crdownload", ".filepart")
 
 
 @dataclasses.dataclass(frozen=True)
 class ArrivalProblem:
-    """One artifact that did not arrive intact."""
+    """One artifact that did not arrive intact.
+
+    `fatal` separates "this data is unusable" from "this is a fault worth seeing".
+    Residue and an empty fetch are the non-fatal cases: both are evidence about how a
+    write went, not proof that what landed is unreadable.
+    """
 
     path: str
     kind: str          # truncated | unreadable | empty | missing | tmp_residue
     detail: str
+    fatal: bool = True
 
     def __str__(self) -> str:
         return f"[{self.kind}] {self.path}: {self.detail}"
 
 
 # ---------------------------------------------------------------- verify ----
-def _verify_npz(p: Path) -> ArrivalProblem | None:
-    """A .npz is a zip: a torn one keeps its header and loses its central
-    directory, which is exactly why size and magic bytes both looked fine."""
+def _verify_zip(p: Path) -> ArrivalProblem | None:
+    """CRC-verify every member. A .npz is a zip: a torn one keeps its header and
+    loses its central directory, which is exactly why size and magic bytes both
+    looked fine. `testzip()` streams the member data and checks the CRC32 the
+    format already stores, which is what a lazy open does not do."""
     try:
         with zipfile.ZipFile(p) as z:
             bad = z.testzip()
@@ -67,6 +96,43 @@ def _verify_npz(p: Path) -> ArrivalProblem | None:
                               "size and magic bytes can both still look correct")
     except OSError as e:
         return ArrivalProblem(str(p), "unreadable", str(e))
+    return None
+
+
+def _verify_gzip(p: Path) -> ArrivalProblem | None:
+    """Decompress fully; gzip's trailing CRC32 and length only verify on a complete
+    read, so a truncated member is invisible until the last block."""
+    try:
+        with gzip.open(p, "rb") as f:
+            while f.read(1 << 20):
+                pass
+    except (OSError, EOFError, zlib.error) as e:
+        # OSError covers gzip.BadGzipFile; zlib.error is a raw inflate failure;
+        # EOFError is the truncation case. Deliberately NOT bare Exception -- a check
+        # that swallows everything cannot distinguish a corrupt file from a bug in
+        # itself.
+        return ArrivalProblem(str(p), "truncated",
+                              f"gzip integrity failed ({type(e).__name__}: {e})")
+    return None
+
+
+def _verify_tar(p: Path) -> ArrivalProblem | None:
+    """Walk every member and read it. tar has no per-member checksum over the DATA
+    (only the header), so a full read is the strongest available check: it catches
+    truncation, which is the failure mode that actually occurs."""
+    try:
+        with tarfile.open(p) as t:
+            for member in t:
+                if not member.isfile():
+                    continue
+                f = t.extractfile(member)
+                if f is None:
+                    continue
+                while f.read(1 << 20):
+                    pass
+    except (tarfile.TarError, OSError, EOFError) as e:
+        return ArrivalProblem(str(p), "truncated",
+                              f"tar integrity failed ({type(e).__name__}: {e})")
     return None
 
 
@@ -96,7 +162,24 @@ def _verify_npy(p: Path) -> ArrivalProblem | None:
     return None
 
 
-_VERIFIERS = {".npz": _verify_npz, ".json": _verify_json, ".npy": _verify_npy}
+#: suffix -> verifier. Anything absent here is counted `unverifiable` and reported as
+#: such rather than quietly passing.
+_VERIFIERS = {
+    ".zip": _verify_zip, ".npz": _verify_zip, ".whl": _verify_zip,
+    ".gz": _verify_gzip, ".gzip": _verify_gzip,
+    ".tar": _verify_tar, ".tgz": _verify_tar,
+    ".json": _verify_json,
+    ".npy": _verify_npy,
+}
+
+
+def _verifier_for(p: Path):
+    """The verifier for `p`, or None if this format carries nothing to check."""
+    suffixes = [s.lower() for s in p.suffixes]
+    # .tar.gz / .tar.bz2 are tar-checked, which subsumes the outer compression.
+    if len(suffixes) >= 2 and suffixes[-2] == ".tar":
+        return _verify_tar
+    return _VERIFIERS.get(suffixes[-1] if suffixes else "")
 
 
 def verify_file(path: str | Path) -> ArrivalProblem | None:
@@ -104,7 +187,7 @@ def verify_file(path: str | Path) -> ArrivalProblem | None:
 
     Falls back to a non-empty check for types with no structural verifier -- which is
     weak, and says so: for an unrecognised suffix a green result means only "bytes are
-    present", not "the file is complete".
+    present", not "the file is complete". `verify_report` counts those separately.
     """
     p = Path(path)
     if not p.exists():
@@ -113,40 +196,112 @@ def verify_file(path: str | Path) -> ArrivalProblem | None:
         return None
     if p.stat().st_size == 0:
         return ArrivalProblem(str(p), "empty", "zero bytes")
-    verifier = _VERIFIERS.get(p.suffix.lower())
+    verifier = _verifier_for(p)
     return verifier(p) if verifier else None
 
 
-def verify_tree(root: str | Path, *, require: Sequence[str] = (),
-                patterns: Iterable[str] = ("*",)) -> list[ArrivalProblem]:
+@dataclasses.dataclass
+class ArrivalReport:
+    """What a tree verification found, with the unverifiable counted rather than
+    folded into the pass."""
+
+    root: Path
+    problems: list[ArrivalProblem] = dataclasses.field(default_factory=list)
+    verified: list[Path] = dataclasses.field(default_factory=list)
+    unverifiable: list[Path] = dataclasses.field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not any(p.fatal for p in self.problems)
+
+    @property
+    def fatal(self) -> list[ArrivalProblem]:
+        return [p for p in self.problems if p.fatal]
+
+    def render(self) -> str:
+        head = (f"{self.root}: {len(self.verified)} verified, "
+                f"{len(self.unverifiable)} unverifiable, "
+                f"{len(self.fatal)} fatal, "
+                f"{len(self.problems) - len(self.fatal)} warning(s)")
+        return "\n".join([head] + [f"  {p}" for p in self.problems])
+
+    def summary(self) -> str:
+        """One line, for a LegResult detail field."""
+        if self.ok:
+            return f"{len(self.verified)} verified, {len(self.unverifiable)} opaque"
+        first = self.fatal[0]
+        more = f" (+{len(self.fatal) - 1} more)" if len(self.fatal) > 1 else ""
+        return f"{Path(first.path).name}: [{first.kind}] {first.detail}{more}"
+
+
+def _is_residue(p: Path) -> bool:
+    name = p.name.lower()
+    return any(name.endswith(s) for s in RESIDUE_SUFFIXES)
+
+
+def verify_report(root: str | Path, *, require: Sequence[str] = (),
+                  patterns: Iterable[str] = ("*",)) -> ArrivalReport:
     """Verify every file under `root`, plus a list of paths that MUST be present.
 
-    Also flags leftover `*.tmp` files: a surviving temp file is evidence that a writer
-    died mid-write, which is worth knowing even when everything else verifies.
+    Also flags partial-write residue (`*.tmp` and friends): a surviving temp file is
+    evidence that a writer died mid-write, which is worth knowing even when everything
+    else verifies. Residue is non-fatal -- an atomic writer leaves exactly this behind
+    with the real file intact.
+
+    An EMPTY tree is reported, but as a warning rather than a failure. A fetch that
+    produced nothing is worth seeing -- it is the `done_when` trap in another costume,
+    where absence reads as success. But `done_when` is the CALLER's declaration of what
+    complete means, and a leg whose marker is the fetch directory itself is legitimately
+    satisfied by an empty one. Overriding that from here would redefine a caller's
+    contract in the name of integrity, which is not this module's business.
     """
     root = Path(root)
-    problems: list[ArrivalProblem] = []
+    report = ArrivalReport(root=root)
     if not root.exists():
-        return [ArrivalProblem(str(root), "missing", "output root does not exist")]
+        report.problems.append(ArrivalProblem(str(root), "missing",
+                                              "output root does not exist"))
+        return report
+    if not root.is_dir():
+        # rglob on a plain file yields nothing, which would otherwise read as an
+        # empty (non-fatal) tree -- a check that cannot fail.
+        report.problems.append(ArrivalProblem(str(root), "missing",
+                                              "output root is not a directory"))
+        return report
 
     for rel in require:
         if not (root / rel).exists():
-            problems.append(ArrivalProblem(str(root / rel), "missing",
-                                           "required artifact absent"))
+            report.problems.append(ArrivalProblem(str(root / rel), "missing",
+                                                  "required artifact absent"))
     for pat in patterns:
         for p in sorted(root.rglob(pat)):
             if not p.is_file():
                 continue
-            if p.name.endswith(".tmp"):
-                problems.append(ArrivalProblem(
+            if _is_residue(p):
+                report.problems.append(ArrivalProblem(
                     str(p), "tmp_residue",
                     "leftover temp file -- a writer died mid-write here; the "
-                    "corresponding final file may be from an earlier attempt"))
+                    "corresponding final file may be from an earlier attempt",
+                    fatal=False))
                 continue
             prob = verify_file(p)
             if prob is not None:
-                problems.append(prob)
-    return problems
+                report.problems.append(prob)
+            (report.verified if _verifier_for(p) else report.unverifiable).append(p)
+
+    if not report.verified and not report.unverifiable:
+        report.problems.append(ArrivalProblem(
+            str(root), "empty",
+            "fetch produced no files -- nothing was transferred. If this leg must "
+            "not accept an empty result, give it a precise done_when (e.g. "
+            "'out/manifest.json') rather than the fetch directory itself.",
+            fatal=False))
+    return report
+
+
+def verify_tree(root: str | Path, *, require: Sequence[str] = (),
+                patterns: Iterable[str] = ("*",)) -> list[ArrivalProblem]:
+    """The problems from `verify_report`, for callers that only want the list."""
+    return verify_report(root, require=require, patterns=patterns).problems
 
 
 # --------------------------------------------------------------- publish ----

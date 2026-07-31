@@ -55,7 +55,7 @@ from collections import deque
 from collections.abc import Iterable
 from pathlib import Path
 
-from run_farm.arrival import publish
+from run_farm.arrival import publish, verify_report
 from run_farm.protocols import (
     HostProbeFailed,
     HostSpec,
@@ -149,7 +149,12 @@ def parse_progress_line(line: str) -> dict[str, str] | None:
 @dataclasses.dataclass(frozen=True)
 class LegResult:
     """The outcome of one leg. `status` is one of:
-    OK | SKIP | NO_RESULT | RUN_FAIL | NO_OFFERS | LEAK | ERROR."""
+    OK | SKIP | NO_RESULT | RUN_FAIL | BAD_ARTIFACTS | NO_OFFERS | LEAK | ERROR.
+
+    BAD_ARTIFACTS means the run finished and the fetch landed, but the files did
+    not survive intact -- a transport fault, not a work failure. Kept distinct
+    from RUN_FAIL because the remedy differs: re-fetch or re-run, versus fix the
+    job. It is NOT `ok`; the whole point is that this used to read as OK."""
 
     label: str
     status: str
@@ -231,6 +236,7 @@ class FleetExecutor:
                  ready_timeout: float = 1200, ready_poll_s: float = 15,
                  run_timeout: float = 9000, jitter_s: float = 2.0,
                  fetch_interval_s: float = 120,
+                 validate_artifacts: bool = True,
                  max_refills: int = 3, ledger=None, log=print):
         self.provider = provider
         self.launch = launch
@@ -249,6 +255,11 @@ class FleetExecutor:
         # MID-RUN, so partial results (relaxed checkpoint, completed sub-legs)
         # survive a host that dies after an hour. Restored to the replacement box.
         self.fetch_interval_s = fetch_interval_s
+        # Verify fetched artifacts before calling a leg OK (see
+        # `_validate_artifacts`). Default ON: silence was the bug. Turn it off only
+        # for a payload whose formats this cannot read anyway, and expect to find out
+        # about corruption from whatever consumes it instead.
+        self.validate_artifacts = validate_artifacts
         self.max_refills = max_refills
         self.ledger = ledger
         self._log = log
@@ -283,9 +294,35 @@ class FleetExecutor:
 
     def _complete(self, leg: FleetLeg) -> bool:
         """True if this leg's output already exists locally -- skip it on a
-        relaunch. With no marker we cannot tell, so it is never pre-skipped."""
+        relaunch. With no marker we cannot tell, so it is never pre-skipped.
+
+        Deliberately a presence test only: it answers "is there something here",
+        and `_validate_artifacts` answers "is it intact". Keeping them apart
+        matters, because a marker satisfied by the wrong thing is a known trap
+        (a leg once read as complete on another provider's leftover marker)."""
         marker = leg.marker()
         return bool(marker) and (self._leg_dir(leg) / marker).exists()
+
+    def _validate_artifacts(self, leg: FleetLeg) -> str | None:
+        """Verify what actually arrived. Returns a one-line reason, or None if the
+        artifacts are intact (or validation is switched off).
+
+        Runs ONLY after a final fetch, never inside `_fetch_loop` -- see that method
+        for why. Every verifiable file is opened and read; nothing here concludes
+        anything from a name or a size, because a plausible size is exactly what the
+        incident that motivated this produced.
+        """
+        if not self.validate_artifacts or not leg.fetch:
+            return None
+        target = self._leg_dir(leg) / os.path.basename(leg.fetch.rstrip("/"))
+        if not target.exists():
+            target = self._leg_dir(leg)
+        report = verify_report(target)
+        if report.ok:
+            return None
+        self._log(f"  {leg.label}: arrived damaged -- {report.summary()}\n"
+                  f"{report.render()}")
+        return report.summary()
 
     # -- per-host steps ------------------------------------------------------
     def _wait_ready(self, host: RentedHost) -> None:
@@ -346,11 +383,13 @@ class FleetExecutor:
         try:
             _scp_down(self.key_path, host.ssh_host, host.ssh_port, remote,
                       str(staging))
-            problems = publish(staging, leg_dir, marker=leg.marker())
-            for p in problems:
-                # Do not raise: a corrupt artifact you can inspect beats one silently
-                # dropped, and the leg's own marker check decides OK vs NO_RESULT.
-                self._log(f"  {leg.label}: arrived damaged -- {p}")
+            # verify=False: publishing never *withholds* a file -- a corrupt artifact
+            # you can inspect beats one silently dropped -- so verifying here would
+            # only produce a log line. `_validate_artifacts` does that once, after the
+            # FINAL fetch, over the whole leg dir. Verifying here instead would report
+            # every mid-run pull of a file the remote is legitimately still writing,
+            # and would miss files banked by an earlier pull.
+            publish(staging, leg_dir, marker=leg.marker(), verify=False)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -377,8 +416,20 @@ class FleetExecutor:
         """Pull `fetch` off-box every `fetch_interval_s` until `stop`, so partial
         results accumulate locally even if the host dies mid-run. Best-effort: a
         failed pull (e.g. the dir doesn't exist yet) is swallowed -- the final
-        `_fetch` and the leak-reaper are the backstops. The box writes atomically,
-        so an in-flight pull never grabs a half-written file."""
+        `_fetch` and the leak-reaper are the backstops.
+
+        THESE PULLS MAY GRAB HALF-WRITTEN FILES. This docstring used to assert "the
+        box writes atomically, so an in-flight pull never grabs a half-written file".
+        That is a claim about the CALLER's engine, which this class cannot make: one
+        such engine did not write atomically, a 120 s pull copied an 86 MB array
+        mid-write, and the truncated copy -- valid header, plausible size -- cost a
+        completed GPU arm its analysis. Even a caller that does write atomically says
+        nothing about a dropped ssh stream or a full local disk on this side.
+
+        A partial file here is EXPECTED and harmless: the next pull overwrites it, and
+        `_run_leg` validates only after the final fetch (see `_validate_artifacts`).
+        Validating in this loop would flag files the remote is legitimately still
+        writing."""
         while not stop.wait(self.fetch_interval_s):
             try:
                 self._fetch(host, leg)
@@ -451,6 +502,11 @@ class FleetExecutor:
                                              f"rc={rc}: {out[-240:]}")
                         self._fetch(host, leg)
                         done = self._complete(leg) or not leg.marker()
+                        if done:
+                            bad = self._validate_artifacts(leg)
+                            if bad is not None:
+                                return LegResult(leg.label, "BAD_ARTIFACTS",
+                                                 host.id, bad)
                         return LegResult(leg.label, "OK" if done else "NO_RESULT",
                                          host.id)
                     finally:

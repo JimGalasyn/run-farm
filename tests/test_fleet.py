@@ -630,7 +630,14 @@ def test_fetch_dying_midway_leaves_no_marker_so_resume_reruns(patched, tmp_path,
 
 
 def test_fetch_publishes_marker_after_payload(patched, tmp_path, monkeypatch):
-    """The positive half: a complete fetch lands everything, marker last."""
+    """The positive half: a complete fetch lands everything, marker last.
+
+    The payload is named `zz_field.bin` ON PURPOSE. `publish` iterates a sorted
+    listing, so with a payload named `field.bin` the marker sorts last anyway and
+    this test passes with the marker-last ordering deleted -- it would assert a
+    property of `sorted()`, not of the code. A name after "manifest.json" makes the
+    explicit ordering the only thing that can produce this result.
+    """
     import os
     order = []
 
@@ -638,7 +645,7 @@ def test_fetch_publishes_marker_after_payload(patched, tmp_path, monkeypatch):
         base = os.path.join(dst, os.path.basename(remote))
         os.makedirs(base, exist_ok=True)
         open(os.path.join(base, "manifest.json"), "w").write("{}")
-        open(os.path.join(base, "field.bin"), "wb").write(b"payload")
+        open(os.path.join(base, "zz_field.bin"), "wb").write(b"payload")
         return (0, "")
 
     real_replace = os.replace
@@ -651,7 +658,7 @@ def test_fetch_publishes_marker_after_payload(patched, tmp_path, monkeypatch):
     [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([leg])
 
     assert r.status == "OK"
-    assert (tmp_path / "L1" / "out_kick" / "field.bin").read_bytes() == b"payload"
+    assert (tmp_path / "L1" / "out_kick" / "zz_field.bin").read_bytes() == b"payload"
     assert order[-1] == "manifest.json", f"marker must be published last: {order}"
 
 
@@ -676,3 +683,108 @@ def test_damaged_arrival_is_logged_not_silently_dropped(patched, tmp_path,
 
     assert (tmp_path / "L1" / "out_kick" / "field.npz").exists(), "kept for inspection"
     assert any("arrived damaged" in m and "truncated" in m for m in logged), logged
+
+
+# ---------------------------------------------------- arrival: the leg gate --
+# A leg whose run succeeded and whose fetch landed used to be OK on the strength
+# of a marker file existing. Nothing opened the payload. These cover the gate
+# that now sits between "the files are here" and "the files are intact".
+def _land(*, corrupt=False, name="field.npz"):
+    """Stub `_scp_down` so a fetch actually deposits a file, optionally damaged."""
+    import zipfile
+    from pathlib import Path
+
+    def scp_down(key, host, port, remote, local_dir):
+        d = Path(local_dir) / "out"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("a.npy", b"x" * 4096)
+        if corrupt:                       # a valid prefix -- the mid-write copy
+            raw = p.read_bytes()
+            p.write_bytes(raw[:len(raw) // 2])
+        return (0, "")
+    return scp_down
+
+
+def test_intact_artifacts_still_report_ok(patched, monkeypatch, tmp_path):
+    """The control. Without this, every assertion below proves nothing."""
+    patched(ready=True)
+    monkeypatch.setattr(fleet, "_scp_down", _land())
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([_leg("L1", fetch="out")])
+    assert r.status == "OK", r.detail
+
+
+def test_corrupt_artifacts_do_not_report_ok(patched, monkeypatch, tmp_path):
+    """The regression this exists for: a truncated payload used to read as OK."""
+    patched(ready=True)
+    monkeypatch.setattr(fleet, "_scp_down", _land(corrupt=True))
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([_leg("L1", fetch="out")])
+    assert r.status == "BAD_ARTIFACTS"
+    assert not r.ok
+    assert "field.npz" in r.detail
+
+
+def test_bad_artifacts_is_distinct_from_run_fail(patched, monkeypatch, tmp_path):
+    """Different remedies: re-fetch versus fix the job. Collapsing them would
+    send a transport fault to the wrong place."""
+    patched(ready=True)
+    monkeypatch.setattr(fleet, "_scp_down", _land(corrupt=True))
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([_leg("L1", fetch="out")])
+    assert r.status not in ("RUN_FAIL", "OK", "NO_RESULT")
+
+
+def test_validation_can_be_switched_off(patched, monkeypatch, tmp_path):
+    """Opt-out exists, and demonstrably changes the verdict on the same bytes."""
+    patched(ready=True)
+    monkeypatch.setattr(fleet, "_scp_down", _land(corrupt=True))
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path,
+                validate_artifacts=False).run([_leg("L1", fetch="out")])
+    assert r.status == "OK"
+
+
+def test_empty_fetch_stays_ok_and_does_not_break_the_marker_contract(
+        patched, monkeypatch, tmp_path):
+    """An empty fetch is warned about, not failed.
+
+    `done_when` defaults to the fetch dir, so an empty one legitimately satisfies
+    the leg's own completion criterion. Failing it here would redefine a caller's
+    contract in the name of integrity -- and would break the existing
+    trailing-slash behaviour, which is how this was caught.
+    """
+    from pathlib import Path
+    patched(ready=True)
+
+    def scp_down(key, host, port, remote, local_dir):
+        (Path(local_dir) / "out").mkdir(parents=True, exist_ok=True)
+        return (0, "")
+    monkeypatch.setattr(fleet, "_scp_down", scp_down)
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([_leg("L1", fetch="out")])
+    assert r.status == "OK", r.detail
+
+
+def test_legs_without_fetch_are_unaffected(patched, tmp_path):
+    """Nothing to validate must not become a failure."""
+    patched(ready=True)
+    [r] = _exec(FakeProvider([_offer("a")]), tmp_path).run([_leg("L1")])
+    assert r.status == "OK"
+
+
+def test_mid_run_pulls_are_not_validated(patched, monkeypatch, tmp_path):
+    """A resumable leg's periodic pull legitimately catches half-written files.
+
+    Validating there would be a false-alarm generator, so `_fetch_loop` must not
+    call it. Asserted by counting calls, not by reading the code.
+    """
+    patched(ready=True)
+    monkeypatch.setattr(fleet, "_scp_down", _land())
+    calls = []
+    real = FleetExecutor._validate_artifacts
+    monkeypatch.setattr(FleetExecutor, "_validate_artifacts",
+                        lambda self, leg: (calls.append(leg.label), real(self, leg))[1])
+    ex = _exec(FakeProvider([_offer("a")]), tmp_path, fetch_interval_s=0.01)
+    leg = FleetLeg(label="L1", command="run.sh", ship=("driver.py",),
+                   fetch="out", resumable=True)
+    [r] = ex.run([leg])
+    assert r.status == "OK"
+    assert calls == ["L1"], f"validated {len(calls)}x; expected exactly once"

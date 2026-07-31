@@ -49,10 +49,48 @@ campaign paid for. Four new public modules, additive only. All of them obey one 
   path, and one that throws destroys the report you were writing.
 - **Arrival contract** (`arrival.py`): `verify_file` OPENS artifacts instead of
   trusting size and magic bytes. A truncated 86 MB `field.npz` had a plausible size and
-  correct PK magic, and failed only on open.
-- 41 tests, every passing case paired with the failure it must catch (suite 242 -> 286),
+  correct PK magic, and failed only on open. Zip-family members (`.npz`, `.zip`,
+  `.whl`) are CRC-verified via `testzip()`, not merely opened: a flipped payload byte
+  leaves the central directory intact, so a bare `ZipFile(p)` SUCCEEDS on a corrupt
+  file. `.gz` is fully decompressed (its CRC32 is in the trailer) and `.tar`/`.tar.gz`
+  members are read through, truncation being the failure that actually occurs.
+- **`verify_report` / `ArrivalReport`**: the same walk, with what could NOT be checked
+  counted rather than folded into the pass. Opaque formats (`.bin`, `.pt`, bare `.npy`
+  without numpy) carry no internal checksum, so they are reported `unverifiable` — a
+  report reading "all clear" over a directory of opaque blobs is the same overclaim in
+  a different costume. Partial-write residue (`.tmp`, `.part`, `.partial`, …) and an
+  empty fetch are surfaced as warnings, not failures: `done_when` is the caller's
+  declaration of completeness, and overriding it here would redefine a caller's
+  contract in the name of integrity.
+- **`FleetExecutor` gates on arrival**: a new `BAD_ARTIFACTS` leg status, and
+  `validate_artifacts=True` to opt out. A leg whose run succeeded and whose fetch
+  landed used to be `OK` on the strength of a marker file existing — nothing opened the
+  payload, so a transport fault arrived wearing the costume of a result. Distinct from
+  `RUN_FAIL` because the remedy differs: re-fetch or re-run, versus fix the job.
+  Validation runs only after the FINAL fetch; a `resumable` leg's periodic pull is
+  *expected* to catch files the remote is still writing, so checking there would
+  generate false alarms.
+- 85 tests, every passing case paired with the failure it must catch (suite 242 -> 330),
   and pytest `pythonpath = ["src"]` — without it an installed `run_farm` shadows this
   checkout and a new module reads as missing.
+
+### Fixed
+- The three marker-last publication tests asserted a property of `sorted()` rather than
+  of `publish`: their payload files sorted before the marker, so the marker landed last
+  with the ordering code deleted. Renamed so the ordering is the only thing that can
+  produce the result — verified by deleting both ordering sites and watching all three
+  fail.
+
+### Changed
+- `FleetExecutor._fetch` no longer verifies each pull. `publish(..., verify=False)`:
+  publication never withholds a file, so verifying there only produced a log line —
+  once per mid-run pull, over files the remote was still writing, and blind to
+  anything an earlier pull had already banked. `_validate_artifacts` does it once,
+  over the whole leg dir, after the final fetch.
+- `_fetch_loop`'s docstring no longer claims "the box writes atomically, so an
+  in-flight pull never grabs a half-written file". That is a claim about the CALLER's
+  engine which this class cannot make — and one such engine did not, which is how the
+  86 MB truncation happened.
 
 ### Fixed
 - **`fleet._fetch` could publish a completion marker over an incomplete leg.** `scp -r`
