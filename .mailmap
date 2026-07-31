@@ -1,15 +1,27 @@
 # Canonical identities for git log / shortlog / blame.
 #
 # Unlike the sibling repos (jax-solitons, jax-morpho, Morphospace), no work address
-# has ever landed here: all 9 commits as of 2026-07-31 are authored AND committed as
-# jim.galasyn@hotmail.com. This repo was created after the personal identity moved
-# into a URL-conditional include (~/.gitconfig-personal, keyed on the
-# github.com/JimGalasyn remote rather than on a path, so it survives a fresh clone
-# anywhere on disk).
+# has ever landed here: all 12 commits as of 2026-07-31 are authored AND committed as
+# jim.galasyn@hotmail.com.
+#
+# WHY it has not recurred is per-machine, and this comment used to give only the work
+# machine's answer as though it were the answer:
+#
+#   - work machine: a conditional include keyed on the REMOTE URL, so the personal
+#     identity attaches to any clone of this repo anywhere on disk —
+#       [includeIf "hasconfig:remote.*.url:https://github.com/JimGalasyn/**"]
+#               path = ~/.gitconfig-personal
+#   - Bender (verified 2026-07-31): no conditional include and no ~/.gitconfig-personal.
+#     The global user.email is simply the personal address, and the work address is not
+#     configured at all. This checkout ALSO carries a repo-local user.email — which
+#     jax-morpho and jax-solitons do not, so do not generalise from it.
+#
+# Neither is enforceable by the repo, so a new machine is unguarded until it is set up.
+# Check `git config user.email` there before the first commit.
 #
 # So only one of the two lines below fixes anything today:
 #
-#   * The NAME split is real: "Jim" (5 commits) and "Jim Galasyn" (4) are the same
+#   * The NAME split is real: "Jim" (7 commits) and "Jim Galasyn" (5) are the same
 #     person, and `git shortlog -sne` reported two authors before this file existed.
 #     The second line collapses them.
 #   * The confluent.io line is PRECAUTIONARY, not corrective. The GitHub account's
