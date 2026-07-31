@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `CITATION.cff`: version DOIs for **v0.1.1** (`10.5281/zenodo.21420305`) and **v0.2.0**
+  (`10.5281/zenodo.21726314`). Both were minted and simply never recorded — v0.1.1's
+  existence answers the open question of whether that tag ever got a GitHub Release: it
+  did. Queried from the Zenodo API against the concept record rather than guessed from
+  the numbering, and each one confirmed to resolve. The README badge stays on the
+  concept DOI, which points at whatever the latest version is.
+
 ## [0.2.0] — Checks that can fail
 
 The wrapper around the campaign mechanism, built from the three things the 2026-07 B2
