@@ -1,7 +1,7 @@
 # Canonical identities for git log / shortlog / blame.
 #
 # Unlike the sibling repos (jax-solitons, jax-morpho, Morphospace), no work address
-# has ever landed here: all 12 commits as of 2026-07-31 are authored AND committed as
+# has ever landed here: all 14 commits as of 2026-07-31 are authored AND committed as
 # jim.galasyn@hotmail.com.
 #
 # WHY it has not recurred is per-machine, and this comment used to give only the work
@@ -21,17 +21,31 @@
 #
 # So only one of the two lines below fixes anything today:
 #
-#   * The NAME split is real: "Jim" (7 commits) and "Jim Galasyn" (5) are the same
+#   * The NAME split is real: "Jim" (8 commits) and "Jim Galasyn" (6) are the same
 #     person, and `git shortlog -sne` reported two authors before this file existed.
 #     The second line collapses them.
-#   * The confluent.io line is PRECAUTIONARY, not corrective. The GitHub account's
-#     public email is still jim.galasyn@confluent.io, and GitHub's squash-merge
-#     re-attributes the merged commit to the ACCOUNT email rather than to the branch
-#     commit's author. This repo lands direct commits on main today, so it has not
-#     happened — the line is here so the first squash-merged PR does not silently
-#     introduce a second author.
+#   * The confluent.io line is PRECAUTIONARY, not corrective — no commit here has ever
+#     carried that address. It used to rest on a prediction: the GitHub account's public
+#     email is jim.galasyn@confluent.io, so a squash-merged PR would be re-attributed to
+#     it. THAT PREDICTION WAS TESTED THREE TIMES AND FAILED EVERY TIME — Morphospace
+#     60b138b (#31, 2026-07-28), jax-solitons 918eda7 (#76, 2026-07-31) and jax-morpho
+#     0dc9a3a (#9, 2026-07-31) were all squash-merged with author
+#     jim.galasyn@hotmail.com, i.e. the BRANCH commit's author, not the account email.
 #
-# Counts above are a snapshot; recompute with
+#     The premise is still true and is not what was wrong: `gh api user` really does
+#     return the work address. The inference drawn from it does not hold. Those are
+#     worth keeping apart, because "the account email is still confluent.io" will go on
+#     looking like evidence for a prediction it does not support.
+#
+#     The line stays, on a weaker and honest basis: it costs nothing, GitHub's
+#     attribution is not something this repo controls, and if it ever does start firing,
+#     an unmapped address would surface here as a second author immediately. Unlike
+#     jax-morpho's and jax-solitons' mapping lines, which are corrective and cover 6 and
+#     57 real commits, this one is pure insurance.
+#
+# Counts above are a snapshot, and they INCLUDE the commit that writes them — the two
+# previous versions of this comment each gave the parent's numbers, because they were
+# read before committing. Recompute after the fact, not before:
 #   git log --format='%an <%ae>' | sort | uniq -c
 #
 # Format: Proper Name <proper@email> <commit@email>

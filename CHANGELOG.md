@@ -83,6 +83,13 @@ campaign paid for. Four new public modules, additive only. All of them obey one 
   checkout and a new module reads as missing.
 
 ### Fixed
+- **`fleet._fetch` could publish a completion marker over an incomplete leg.** `scp -r`
+  lands files in arbitrary order and the `done_when` marker is one of them, so a fetch
+  that wrote the marker and then died left a leg dir `_complete()` reads as done —
+  silently pre-skipping an incomplete leg on every future relaunch. `_fetch` now stages
+  and publishes the marker LAST: a completion marker must be the last byte written or
+  it is not one. Verified by reverting `_fetch` to the un-staged form, which fails all
+  three new fleet tests and reports plain "LEG L1: OK" for a truncated `field.npz`.
 - The three marker-last publication tests asserted a property of `sorted()` rather than
   of `publish`: their payload files sorted before the marker, so the marker landed last
   with the ordering code deleted. Renamed so the ordering is the only thing that can
@@ -99,17 +106,6 @@ campaign paid for. Four new public modules, additive only. All of them obey one 
   in-flight pull never grabs a half-written file". That is a claim about the CALLER's
   engine which this class cannot make — and one such engine did not, which is how the
   86 MB truncation happened.
-
-### Fixed
-- **`fleet._fetch` could publish a completion marker over an incomplete leg.** `scp -r`
-  lands files in arbitrary order and the `done_when` marker is one of them, so a fetch
-  that wrote the marker and then died left a leg dir `_complete()` reads as done —
-  silently pre-skipping an incomplete leg on every future relaunch. `_fetch` now stages
-  and publishes the marker LAST: a completion marker must be the last byte written or
-  it is not one. Verified by reverting `_fetch` to the un-staged form, which fails all
-  three new fleet tests and reports plain "LEG L1: OK" for a truncated `field.npz`.
-
-### Changed
 - **`run_farm.preflight` -> `run_farm.gauntlet`** (`PreflightError` -> `GauntletError`,
   `gauntlet()` -> `run_gauntlet()`, `require()` -> `require_gauntlet()`). Two things
   named preflight in one package is exactly the ambiguity that lets someone think a
