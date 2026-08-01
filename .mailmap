@@ -24,24 +24,29 @@
 #   * The NAME split is real: "Jim" (8 commits) and "Jim Galasyn" (6) are the same
 #     person, and `git shortlog -sne` reported two authors before this file existed.
 #     The second line collapses them.
-#   * The confluent.io line is PRECAUTIONARY, not corrective — no commit here has ever
-#     carried that address. It used to rest on a prediction: the GitHub account's public
-#     email is jim.galasyn@confluent.io, so a squash-merged PR would be re-attributed to
-#     it. THAT PREDICTION WAS TESTED THREE TIMES AND FAILED EVERY TIME — Morphospace
-#     60b138b (#31, 2026-07-28), jax-solitons 918eda7 (#76, 2026-07-31) and jax-morpho
-#     0dc9a3a (#9, 2026-07-31) were all squash-merged with author
-#     jim.galasyn@hotmail.com, i.e. the BRANCH commit's author, not the account email.
+#   * The confluent.io line is PRECAUTIONARY — no commit here has ever carried that
+#     address — but do not read that as idle. It rests on a prediction that turns out to
+#     be TRUE: the GitHub account's public email is jim.galasyn@confluent.io, and a
+#     squash-merged PR can be re-attributed to it. Verified 2026-08-01 by comparing
+#     PRE-SQUASH branch authors with the squashed result, which is the comparison the
+#     earlier round never made: exoclimate #1 (`58ce3be` hotmail -> `6aab14d` confluent)
+#     and proc-warden #11 (`50fb8fa` hotmail -> `235f509` confluent), plus
+#     soliton-playground #1 (`337084c` confluent). It is INTERMITTENT — jax-solitons #74
+#     kept the branch author five seconds before proc-warden #11 did not — so a sample
+#     of three negatives said nothing. The trigger is undetermined (`gh api user/emails`
+#     needs the `user` scope).
 #
-#     The premise is still true and is not what was wrong: `gh api user` really does
-#     return the work address. The inference drawn from it does not hold. Those are
-#     worth keeping apart, because "the account email is still confluent.io" will go on
-#     looking like evidence for a prediction it does not support.
+#     This repo lands direct commits on main, so it has not been exposed yet; the line is
+#     what keeps the FIRST squash-merged PR here from introducing a second author.
 #
-#     The line stays, on a weaker and honest basis: it costs nothing, GitHub's
-#     attribution is not something this repo controls, and if it ever does start firing,
-#     an unmapped address would surface here as a second author immediately. Unlike
-#     jax-morpho's and jax-solitons' mapping lines, which are corrective and cover 6 and
-#     57 real commits, this one is pure insurance.
+#     The three negatives that the previous version of this comment reported —
+#     Morphospace `60b138b` (#31), jax-solitons `918eda7` (#76), jax-morpho `0dc9a3a`
+#     (#9), all landing as hotmail — are real observations and are left standing. What
+#     was wrong was the conclusion drawn from them. They sample the OUTPUT only; without
+#     the pre-squash author there is nothing to compare against, so a green reading and a
+#     broken mechanism look identical. Every check must be able to fail: that one could
+#     not distinguish "GitHub preserved the branch author" from "the branch author was
+#     already the account email".
 #
 # Counts above are a snapshot, and they INCLUDE the commit that writes them — the two
 # previous versions of this comment each gave the parent's numbers, because they were
