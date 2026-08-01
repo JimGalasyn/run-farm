@@ -21,7 +21,7 @@
 #
 # So only one of the two lines below fixes anything today:
 #
-#   * The NAME split is real: "Jim" (8 commits) and "Jim Galasyn" (6) are the same
+#   * The NAME split is real: "Jim" (9 commits) and "Jim Galasyn" (7) are the same
 #     person, and `git shortlog -sne` reported two authors before this file existed.
 #     The second line collapses them.
 #   * The confluent.io line is PRECAUTIONARY — no commit here has ever carried that
@@ -33,8 +33,12 @@
 #     and proc-warden #11 (`50fb8fa` hotmail -> `235f509` confluent), plus
 #     soliton-playground #1 (`337084c` confluent). It is INTERMITTENT — jax-solitons #74
 #     kept the branch author five seconds before proc-warden #11 did not — so a sample
-#     of three negatives said nothing. The trigger is undetermined (`gh api user/emails`
-#     needs the `user` scope).
+#     of three negatives said nothing. The trigger is undetermined, and two explanations
+#     are now ruled out (checked 2026-08-01 with the `user:email` scope): the account did
+#     not change — `gh api user/emails` reports jim.galasyn@confluent.io still PRIMARY,
+#     verified and public, the state it was in when this fired — and the merge path
+#     leaves no trace, all seven 07-27-era squash commits carrying committer
+#     `GitHub <noreply@github.com>` with a valid signature.
 #
 #     This repo lands direct commits on main, so it has not been exposed yet; the line is
 #     what keeps the FIRST squash-merged PR here from introducing a second author.
@@ -42,11 +46,13 @@
 #     The three negatives that the previous version of this comment reported —
 #     Morphospace `60b138b` (#31), jax-solitons `918eda7` (#76), jax-morpho `0dc9a3a`
 #     (#9), all landing as hotmail — are real observations and are left standing. What
-#     was wrong was the conclusion drawn from them. They sample the OUTPUT only; without
-#     the pre-squash author there is nothing to compare against, so a green reading and a
-#     broken mechanism look identical. Every check must be able to fail: that one could
-#     not distinguish "GitHub preserved the branch author" from "the branch author was
-#     already the account email".
+#     was wrong was the conclusion drawn from them — and it is worth being exact about
+#     what the error was NOT. Those three checks COULD have failed: the account email is
+#     confluent.io while the observed outputs were hotmail, so "GitHub preserved the
+#     branch author" and "GitHub re-attributed to the account email" predict DIFFERENT
+#     values, and the same check run against exoclimate #1 does fail. The error was
+#     generalising from three samples of an intermittent effect, all of them among the
+#     most RECENT merges, without ever comparing the pre-squash author.
 #
 # Counts above are a snapshot, and they INCLUDE the commit that writes them — the two
 # previous versions of this comment each gave the parent's numbers, because they were
