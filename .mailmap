@@ -21,7 +21,7 @@
 #
 # So only one of the two lines below fixes anything today:
 #
-#   * The NAME split is real: "Jim" (9 commits) and "Jim Galasyn" (7) are the same
+#   * The NAME split is real: "Jim" (10 commits) and "Jim Galasyn" (7) are the same
 #     person, and `git shortlog -sne` reported two authors before this file existed.
 #     The second line collapses them.
 #   * The confluent.io line is PRECAUTIONARY — no commit here has ever carried that
@@ -40,8 +40,21 @@
 #     leaves no trace, all seven 07-27-era squash commits carrying committer
 #     `GitHub <noreply@github.com>` with a valid signature.
 #
-#     This repo lands direct commits on main, so it has not been exposed yet; the line is
-#     what keeps the FIRST squash-merged PR here from introducing a second author.
+#     NOT SQUASH-SPECIFIC, measured 2026-08-01. GitHub re-attributes any commit it
+#     composes on the account's behalf, merge commits included: jax-solitons PR #77,
+#     merged with `--merge`, has two parents both authored jim.galasyn@hotmail.com and
+#     a merge commit `b33f0a2` authored jim.galasyn@confluent.io. That firing is also
+#     more recent than every other on record — earlier ones were all 2026-07-27 or
+#     before — so the behaviour is live, not historical.
+#
+#     A LOCAL merge (`git merge --no-ff` then push) is authored from your own config
+#     and avoids it, unless a ruleset demands code-scanning results for the pushed
+#     commit; a locally-made merge commit can never satisfy that, since GitHub cannot
+#     scan a commit it has never seen.
+#
+#     This repo lands direct commits on main, so it has not been exposed yet; the line
+#     is what keeps the FIRST merged PR here — of either kind — from introducing a
+#     second author.
 #
 #     The three negatives that the previous version of this comment reported —
 #     Morphospace `60b138b` (#31), jax-solitons `918eda7` (#76), jax-morpho `0dc9a3a`
