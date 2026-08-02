@@ -103,7 +103,7 @@ class GauntletError(RuntimeError):
             + "\n  ".join(str(r) for r in self.blocking))
 
 
-def run_gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
+def run_gauntlet(checks: Iterable, *, log=print, skip: Sequence[str] = ()) -> list[CheckResult]:
     """Run every check, in order, and return all results.
 
     Does NOT stop at the first failure and does NOT raise: the point is to spend one
@@ -115,6 +115,18 @@ def run_gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
     results: list[CheckResult] = []
     for check in checks:
         name = getattr(check, "name", getattr(check, "__name__", type(check).__name__))
+        if name in skip:
+            # Recorded, never silent. A skipped check that vanishes from the report
+            # is indistinguishable from one that passed -- which is the whole failure
+            # this module exists to prevent. It is also non-fatal by construction:
+            # the human took responsibility, so say so and carry on.
+            r = CheckResult(name, True, "SKIPPED by caller — not verified here",
+                            "nothing. A skip proves only that someone chose to "
+                            "accept this risk out-of-band.", fatal=False)
+            results.append(r)
+            if log:
+                log(str(r))
+            continue
         try:
             r = check()
         except Exception as e:                                # noqa: BLE001
@@ -127,9 +139,18 @@ def run_gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
     return results
 
 
-def require_gauntlet(checks: Iterable, *, log=print) -> list[CheckResult]:
-    """`run_gauntlet`, but raise `GauntletError` if anything fatal failed."""
-    results = run_gauntlet(checks, log=log)
+def require_gauntlet(checks: Iterable, *, log=print,
+                     skip: Sequence[str] = ()) -> list[CheckResult]:
+    """`run_gauntlet`, but raise `GauntletError` if anything fatal failed.
+
+    `skip` names checks to bypass, by `CheckResult.name`. Two checks tell the
+    caller to use it (`ssh-key-registered` when the provider exposes no way to
+    enumerate keys); before this existed those messages named a parameter that
+    was not implemented, so the only way to follow the advice was to edit the
+    check list -- and a caller who edits the list usually deletes the check
+    rather than recording that it was bypassed.
+    """
+    results = run_gauntlet(checks, log=log, skip=skip)
     if any(r.blocking for r in results):
         raise GauntletError(results)
     return results
