@@ -101,6 +101,13 @@ class FleetLeg:
                own skip-if-exists continues instead of recomputing. Off by
                default (atomic legs unchanged). Requires a driver that does
                skip-if-exists + atomic writes for the partial to be trustworthy.
+      reattachable  the command is safe to RE-ENTER, so a dead ssh CHANNEL over a
+               live host is retried against that same host instead of failing the
+               leg. Off by default, and it must be: re-running a command that
+               launches work unconditionally starts a SECOND copy racing the
+               first. The contract a reattachable command owes is
+               launch-if-not-already-running (a pidfile or equivalent) and then
+               wait on the marker -- see `_run_command`.
     """
 
     label: str
@@ -110,6 +117,7 @@ class FleetLeg:
     done_when: str = ""
     stream_progress: bool = False
     resumable: bool = False
+    reattachable: bool = False
 
     def marker(self) -> str:
         """The local relative path that signals this leg is complete."""
@@ -238,7 +246,8 @@ class FleetExecutor:
                  run_timeout: float = 9000, jitter_s: float = 2.0,
                  fetch_interval_s: float = 120,
                  validate_artifacts: bool = True,
-                 max_refills: int = 3, ledger=None, log=print):
+                 max_refills: int = 3, ledger=None, log=print,
+                 reattach_attempts: int = 3, reattach_backoff_s: float = 20.0):
         self.provider = provider
         self.launch = launch
         self.local_out_dir = Path(local_out_dir)
@@ -252,6 +261,11 @@ class FleetExecutor:
         self.ready_poll_s = ready_poll_s
         self.run_timeout = run_timeout
         self.jitter_s = jitter_s
+        # Reattach budget for a `reattachable` leg whose ssh channel dies over a
+        # host that is still alive. Attempts share ONE run_timeout deadline rather
+        # than getting a fresh one each -- see `_run_command`.
+        self.reattach_attempts = max(0, reattach_attempts)
+        self.reattach_backoff_s = reattach_backoff_s
         # Cadence (s) at which a `resumable` leg's fetch dir is pulled off-box
         # MID-RUN, so partial results (relaxed checkpoint, completed sub-legs)
         # survive a host that dies after an hour. Restored to the replacement box.
@@ -470,16 +484,7 @@ class FleetExecutor:
                                 args=(host, leg, fetch_stop), daemon=True)
                             fetcher.start()
                         try:
-                            if leg.stream_progress:
-                                leg_dir = self._leg_dir(leg)
-                                leg_dir.mkdir(parents=True, exist_ok=True)
-                                rc, out = _ssh_stream(
-                                    self.key_path, host.ssh_host, host.ssh_port, cmd,
-                                    self.run_timeout, str(leg_dir / PROGRESS_LOG))
-                            else:
-                                rc, out = _ssh(self.key_path, host.ssh_host,
-                                               host.ssh_port, cmd,
-                                               timeout=self.run_timeout)
+                            rc, out = self._run_command(host, leg, cmd)
                         finally:
                             if fetcher is not None:
                                 fetch_stop.set()
@@ -540,6 +545,68 @@ class FleetExecutor:
                 is_leak = isinstance(e, LeakRisk) or "LEAK" in msg.upper()
                 return LegResult(leg.label, "LEAK" if is_leak else "ERROR", offer.id,
                                  f"{type(e).__name__}: {msg[:200]}")
+
+    #: ssh's own exit code for "could not establish, or lost, the connection".
+    #: It did NOT come from the payload.
+    SSH_TRANSPORT_RC = 255
+
+    def _ssh_once(self, host, leg: FleetLeg, cmd: str, timeout: float):
+        """One attempt at the leg command, streaming or not."""
+        if leg.stream_progress:
+            leg_dir = self._leg_dir(leg)
+            leg_dir.mkdir(parents=True, exist_ok=True)
+            return _ssh_stream(self.key_path, host.ssh_host, host.ssh_port, cmd,
+                               timeout, str(leg_dir / PROGRESS_LOG))
+        return _ssh(self.key_path, host.ssh_host, host.ssh_port, cmd,
+                    timeout=timeout)
+
+    def _run_command(self, host, leg: FleetLeg, cmd: str):
+        """Run the leg command, REATTACHING to the same host if the channel dies.
+
+        `rc == 255` is ssh's own transport failure, not the payload's exit code.
+        With the host confirmed alive, that says we lost the connection to a box
+        that is still there -- which is not the same statement as "the work
+        failed", and the old code conflated them: a 2026-08-03 rental lost a
+        5500-step N=320 relaxation to `ssh5.vast.ai not responding` and was filed
+        terminal RUN_FAIL over a healthy A100, tearing the box down with its
+        checkpoint on it. Reattaching is both cheaper and more accurate.
+
+        Opt-in per leg (`reattachable`), because retrying is only safe for a
+        re-enterable command; see that field's docs. A non-reattachable leg keeps
+        exactly the old behaviour, single attempt included.
+
+        ONE SHARED DEADLINE, not a fresh `run_timeout` per attempt. Per-attempt
+        timeouts would multiply the billing window by `reattach_attempts` -- 2.5 h
+        becoming 10 h on a box charged by the second -- and `run_timeout` is what
+        the caller's cost estimate is computed from. Backoff sleeps come out of the
+        same budget, so the wall-clock bound is unchanged by this feature.
+        """
+        deadline = time.time() + self.run_timeout
+        attempts = 1 + (self.reattach_attempts if leg.reattachable else 0)
+        rc, out = self.SSH_TRANSPORT_RC, "no attempt ran"
+        for i in range(attempts):
+            left = deadline - time.time()
+            if left <= 0:
+                return 124, (f"run_timeout {self.run_timeout}s exhausted across "
+                             f"{i} attempt(s); last: {out[-200:]}")
+            rc, out = self._ssh_once(host, leg, cmd, timeout=left)
+            if rc != self.SSH_TRANSPORT_RC:
+                return rc, out                    # the payload spoke; trust it
+            if i == attempts - 1:
+                break
+            dead = self._host_dead(host.id)
+            if dead:
+                # Not a blip -- the box is gone. Hand the non-zero back so the
+                # caller's normal path fails over to fresh hardware instead of
+                # reattaching to a corpse.
+                return rc, f"{out}  [host confirmed dead: {dead}]"
+            self._log(f"  {leg.label}: ssh transport died (rc={rc}) but host "
+                      f"{host.id} is ALIVE -- reattaching "
+                      f"{i + 1}/{self.reattach_attempts} after "
+                      f"{self.reattach_backoff_s:.0f}s "
+                      f"({left - self.reattach_backoff_s:.0f}s of budget left)")
+            time.sleep(self.reattach_backoff_s)
+        return rc, out
 
     def _host_dead(self, host_id: str) -> str | None:
         """The provider's `dead_reason` for `host_id` if it exposes one and the

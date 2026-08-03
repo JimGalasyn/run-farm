@@ -826,3 +826,112 @@ def test_mid_run_pulls_are_not_validated(patched, monkeypatch, tmp_path):
     [r] = ex.run([leg])
     assert r.status == "OK"
     assert calls == ["L1"], f"validated {len(calls)}x; expected exactly once"
+
+
+# --- reattach: a dead CHANNEL over a live host is not a failed job -----------
+# From a real loss: a 2026-08-03 N=320 rental was 5500 steps in when
+# `ssh5.vast.ai` stopped responding. ssh returned 255, the provider reported the
+# A100 perfectly alive, and the leg was filed terminal RUN_FAIL -- so the box was
+# destroyed with its checkpoint on it. rc 255 is ssh's OWN code for a transport
+# failure; it never came from the payload, and over a live host it cannot mean the
+# work failed.
+
+def _flaky_ssh(*, transport_failures, run_out="done"):
+    """Fail the leg command with ssh's transport rc N times, then succeed.
+
+    Counts the leg-command attempts so a test can assert the command was
+    re-entered rather than the leg being retried on new hardware.
+    """
+    state = {"leg_calls": 0}
+
+    def fake_ssh(key, host, port, cmd, timeout=120):
+        if "import run_farm" in cmd:
+            return 0, ""
+        if "worker-ready" in cmd:
+            return 0, "/tmp/worker-ready"
+        state["leg_calls"] += 1
+        if state["leg_calls"] <= transport_failures:
+            return 255, "Timeout, server ssh5.vast.ai not responding."
+        return 0, run_out
+    return fake_ssh, state
+
+
+def test_reattachable_leg_survives_a_transport_blip_on_the_same_host(monkeypatch,
+                                                                    tmp_path):
+    monkeypatch.setattr(fleet.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fleet, "_scp_up", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(fleet, "_scp_down", lambda *a, **k: (0, ""))
+    ssh, state = _flaky_ssh(transport_failures=2)
+    monkeypatch.setattr(fleet, "_ssh", ssh)
+    prov = FakeProvider([_offer("a"), _offer("b")])
+    leg = FleetLeg(label="L1", command="run.sh", ship=("driver.py",),
+                   reattachable=True)
+    [r] = _exec(prov, tmp_path).run([leg])
+    assert r.status == "OK", r.detail
+    assert state["leg_calls"] == 3            # two blips, then the real run
+    assert prov.rented == ["a"]               # SAME host -- no failover, no re-rent
+    assert prov.live == {}
+
+
+def test_transport_failure_is_still_terminal_without_opt_in(monkeypatch, tmp_path):
+    """The default is unchanged: one attempt, and rc 255 ends the leg."""
+    monkeypatch.setattr(fleet.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fleet, "_scp_up", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(fleet, "_scp_down", lambda *a, **k: (0, ""))
+    ssh, state = _flaky_ssh(transport_failures=1)
+    monkeypatch.setattr(fleet, "_ssh", ssh)
+    prov = FakeProvider([_offer("a")])
+    [r] = _exec(prov, tmp_path).run([_leg("L1")])       # reattachable=False
+    assert r.status == "RUN_FAIL" and "255" in r.detail
+    assert state["leg_calls"] == 1
+
+
+def test_reattach_does_not_cling_to_a_host_the_provider_calls_dead(monkeypatch,
+                                                                  tmp_path):
+    """A blip over a DEAD box must fail over to fresh hardware, not reattach."""
+    monkeypatch.setattr(fleet.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fleet, "_scp_up", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(fleet, "_scp_down", lambda *a, **k: (0, ""))
+    ssh, state = _flaky_ssh(transport_failures=1)
+    monkeypatch.setattr(fleet, "_ssh", ssh)
+    # 'a' reports dead via dead_reason, so the 255 over it is a corpse, not a blip.
+    prov = FakeProvider([_offer("a"), _offer("b")], dead_ids={"a"})
+    leg = FleetLeg(label="L1", command="run.sh", ship=("driver.py",),
+                   reattachable=True)
+    [r] = _exec(prov, tmp_path).run([leg])
+    assert r.status == "OK", r.detail
+    assert prov.rented == ["a", "b"]          # failed OVER rather than reattaching
+    assert state["leg_calls"] == 2            # one per host, not 1 + retries
+
+
+def test_reattach_attempts_share_one_run_timeout_deadline(monkeypatch, tmp_path):
+    """Retries must not multiply the billing window.
+
+    Per-attempt timeouts would turn a 2.5 h budget into 10 h on a box charged by
+    the second. Each attempt gets only what is LEFT of one run_timeout.
+    """
+    monkeypatch.setattr(fleet, "_scp_up", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(fleet, "_scp_down", lambda *a, **k: (0, ""))
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(fleet.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(fleet.time, "sleep",
+                        lambda s: clock.__setitem__("t", clock["t"] + s))
+    seen = []
+
+    def ssh(key, host, port, cmd, timeout=120):
+        if "import run_farm" in cmd or "worker-ready" in cmd:
+            return (0, "/tmp/worker-ready")
+        seen.append(timeout)
+        clock["t"] += 40.0                      # each attempt burns 40s
+        return 255, "transport died"
+    monkeypatch.setattr(fleet, "_ssh", ssh)
+    prov = FakeProvider([_offer("a")])
+    leg = FleetLeg(label="L1", command="run.sh", ship=("driver.py",),
+                   reattachable=True)
+    [r] = _exec(prov, tmp_path, run_timeout=100, reattach_backoff_s=10).run([leg])
+    # 100s budget: attempt1 gets 100, burns 40; +10 backoff; attempt2 gets 50,
+    # burns 40; +10; attempt3 gets 0 -> refused. Strictly decreasing, never reset.
+    assert seen == sorted(seen, reverse=True), seen
+    assert all(t <= 100 for t in seen), seen
+    assert sum(seen) < 3 * 100                  # not three fresh full budgets
+    assert r.status == "RUN_FAIL"
