@@ -57,6 +57,7 @@ from pathlib import Path
 
 from run_farm.arrival import publish, verify_report
 from run_farm.protocols import (
+    BudgetExceeded,
     HostProbeFailed,
     HostSpec,
     LaunchSpec,
@@ -511,6 +512,20 @@ class FleetExecutor:
                                          host.id)
                     finally:
                         self._untrack(host.id)
+            except BudgetExceeded:
+                # A deliberate stop, not a bad host -- so it does NOT become a
+                # LegResult. It propagates out of `run()` and halts the campaign.
+                # Caught before the failover clause and the catch-all below, both
+                # of which would be wrong: failing over would rent the next offer
+                # against a cap that just refused one, and the catch-all would
+                # bury it as an ordinary ERROR -- which is what it did until the
+                # exception moved into `protocols` where this module can see it.
+                # The remaining legs would then each have attempted their own
+                # doomed rent, and a caller's `except BudgetExceeded` around
+                # `run()` could never fire.
+                self._log(f"  {leg.label}: offer {offer.id} BudgetExceeded "
+                          f"-> HALTING the campaign (no host created)")
+                raise
             except (HostProbeFailed, TimeoutError, RentUnavailable) as e:
                 self._log(f"  {leg.label}: offer {offer.id} "
                           f"{type(e).__name__} -> failing over")
@@ -589,30 +604,53 @@ class FleetExecutor:
                                                "output already present")
             else:
                 pending.append(leg)
-        if pending:
-            self._log(f"{len(pending)} leg(s) to run, {len(results)} skipped "
-                      f"(already complete); up to {self.max_parallel} parallel")
-            pool = _OfferPool(self.provider, self.host_spec,
-                              max_refills=self.max_refills)
-            with self._signal_guard():
-                with cf.ThreadPoolExecutor(max_workers=self.max_parallel) as ex:
-                    futs = {ex.submit(self._run_leg, pool, leg, i): leg
-                            for i, leg in enumerate(pending)}
-                    for fut in cf.as_completed(futs):
-                        r = fut.result()
-                        results[r.label] = r
-                        self._log(f"LEG {r.label}: {r.status}"
-                                  + (f" ({r.detail})" if r.detail else ""))
-        # Post-run reconciliation (#48): every tracked rental is untracked in its
-        # leg's finally, so a non-empty _live here means a teardown gap (a rental
-        # that escaped cleanup). Surface it loudly and sweep before it bills.
+        try:
+            if pending:
+                self._log(f"{len(pending)} leg(s) to run, {len(results)} skipped "
+                          f"(already complete); up to {self.max_parallel} parallel")
+                pool = _OfferPool(self.provider, self.host_spec,
+                                  max_refills=self.max_refills)
+                with self._signal_guard():
+                    with cf.ThreadPoolExecutor(max_workers=self.max_parallel) as ex:
+                        futs = {ex.submit(self._run_leg, pool, leg, i): leg
+                                for i, leg in enumerate(pending)}
+                        try:
+                            for fut in cf.as_completed(futs):
+                                r = fut.result()
+                                results[r.label] = r
+                                self._log(f"LEG {r.label}: {r.status}"
+                                          + (f" ({r.detail})" if r.detail else ""))
+                        except BudgetExceeded:
+                            # Raising alone does NOT stop the campaign: every leg was
+                            # already submitted, and the pool's __exit__ waits for the
+                            # queue to DRAIN, so each remaining leg would still run
+                            # and attempt its own rent. Cancel what has not started.
+                            # Legs already running are deliberately left alone -- they
+                            # hold hosts, and their own `finally` is what tears those
+                            # down; killing them here is how you strand a GPU.
+                            n = sum(1 for f in futs if f.cancel())
+                            self._log(f"  budget halt: cancelled {n} leg(s) that had "
+                                      f"not started")
+                            raise
+        finally:
+            # In a `finally` because a leg may now raise THROUGH here
+            # (`BudgetExceeded` halts the campaign): the abnormal exit is exactly
+            # when a teardown gap is most likely, so the sweep must not be the thing
+            # that gets skipped. The ThreadPoolExecutor context has already joined
+            # any sibling legs still running, so `_live` is settled by this point.
+            self._reconcile_stranded()
+        return [results[leg.label] for leg in legs]
+
+    def _reconcile_stranded(self) -> None:
+        """Post-run reconciliation (#48): every tracked rental is untracked in its
+        leg's finally, so a non-empty `_live` here means a teardown gap (a rental
+        that escaped cleanup). Surface it loudly and sweep before it bills."""
         with self._live_lock:
             stranded = list(self._live)
         if stranded:
             self._log(f"!! {len(stranded)} rental(s) STILL TRACKED after run "
                       f"(teardown gap) -- destroying: {stranded}")
             self._destroy_live()
-        return [results[leg.label] for leg in legs]
 
     def _signal_guard(self):
         """For the duration of `run()`, make SIGTERM/SIGINT tear down live

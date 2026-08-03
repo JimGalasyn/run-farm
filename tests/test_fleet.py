@@ -13,7 +13,7 @@ import types
 import pytest
 
 import run_farm.fleet as fleet
-from run_farm import (FleetExecutor, FleetLeg, HostProbeFailed,
+from run_farm import (BudgetExceeded, FleetExecutor, FleetLeg, HostProbeFailed,
                                    HostSpec, LaunchSpec, LegResult, Offer,
                                    RentedHost, RentUnavailable, SentinelReady,
                                    fleet_status)
@@ -351,6 +351,44 @@ def test_leak_surfaces_as_leak_status(patched, tmp_path):
     prov = _RaiseProvider([_offer("a")], "LEAK RISK: instance 9 not torn down")
     [r] = _exec(prov, tmp_path).run([_leg("L1")])
     assert r.status == "LEAK"
+
+
+class _CapBlownProvider(FakeProvider):
+    """A CappedProvider whose cap is already reached: every rent() is refused
+    before any host exists. Records the attempt, so a test can tell "halted" from
+    "carried on and refused each leg in turn"."""
+
+    @contextlib.contextmanager
+    def rent(self, offer, launch, *, timeout_s=600):
+        self.rented.append(offer.id)
+        raise BudgetExceeded(f"cap reached -- refusing offer {offer.id}")
+        yield  # pragma: no cover  (unreachable; makes this a generator cm)
+
+
+def test_budget_exceeded_halts_instead_of_becoming_a_legresult(patched, tmp_path):
+    """BudgetExceeded propagates out of run() -- a deliberate stop, not a bad host.
+    It was previously swallowed by the catch-all into an ERROR LegResult, which made
+    a caller's `except BudgetExceeded` around run() unreachable and let every
+    remaining leg go on to attempt its own doomed rent."""
+    patched(ready=True)
+    prov = _CapBlownProvider([_offer("a"), _offer("b"), _offer("c")])
+    with pytest.raises(BudgetExceeded):
+        _exec(prov, tmp_path, max_parallel=1).run(
+            [_leg("L1"), _leg("L2"), _leg("L3")])
+    assert prov.rented == ["a"]         # no failover, and no second leg tried
+    assert prov.live == {}              # nothing was created to leak
+
+
+def test_budget_exceeded_still_sweeps_stranded_rentals(patched, tmp_path):
+    """The halt must not skip post-run reconciliation: an abnormal exit is exactly
+    when a teardown gap is most likely, so the sweep runs in a finally."""
+    patched(ready=True)
+    prov = _CapBlownProvider([_offer("a")])
+    ex = _exec(prov, tmp_path)
+    ex._track("stranded-1")                                # a rental that escaped
+    with pytest.raises(BudgetExceeded):
+        ex.run([_leg("L1")])
+    assert prov.destroyed == ["stranded-1"]
 
 
 def test_destroy_live_no_destroy_method_is_noop(tmp_path):

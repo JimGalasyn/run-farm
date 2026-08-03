@@ -19,14 +19,15 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 
-from run_farm.protocols import HostSpec, LaunchSpec, Offer, RentedHost
+from run_farm.protocols import (BudgetExceeded, HostSpec, LaunchSpec, Offer,
+                                RentedHost)
 
-
-class BudgetExceeded(RuntimeError):
-    """A rent would push spend past the cap, so it was refused before any host was
-    created. Distinct from the failover signals (`RentUnavailable`,
-    `HostProbeFailed`): this is a deliberate stop, not a bad host -- it must halt the
-    campaign, not fail over to the next offer."""
+# `BudgetExceeded` is re-exported here, not defined here: it moved to `protocols`
+# beside the other provider-raised signals, because `fleet` has to know it by type
+# to halt on it instead of swallowing it into a LegResult. `from run_farm.budget
+# import BudgetExceeded` and `from run_farm import BudgetExceeded` both keep
+# working -- it is the same class object either way.
+__all__ = ["BudgetExceeded", "CappedProvider", "estimate"]
 
 
 def estimate(n_runs: int, s_per_run: float, dph: float, *,

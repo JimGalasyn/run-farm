@@ -403,6 +403,19 @@ class LeakRisk(RuntimeError):
     this is NOT a failover signal -- it must surface loudly, not be retried."""
 
 
+class BudgetExceeded(RuntimeError):
+    """A rent would push spend past the cap, so it was refused before any host was
+    created. Distinct from the failover signals (`RentUnavailable`,
+    `HostProbeFailed`): this is a deliberate stop, not a bad host -- it must halt the
+    campaign, not fail over to the next offer.
+
+    It lives here, beside the other provider-raised signals, because an executor has
+    to know it by TYPE to honour that contract. When it was defined in `budget` and
+    unknown to `fleet`, `FleetExecutor`'s catch-all turned it into an ordinary ERROR
+    `LegResult` -- so a driver's `except BudgetExceeded` around `run()` was
+    unreachable, and every remaining leg went on to attempt its own doomed rent."""
+
+
 @runtime_checkable
 class Provider(Protocol):
     """A pluggable cloud broker: list offers, rent one, ALWAYS tear it down (F).
