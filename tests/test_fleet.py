@@ -935,3 +935,34 @@ def test_reattach_attempts_share_one_run_timeout_deadline(monkeypatch, tmp_path)
     assert all(t <= 100 for t in seen), seen
     assert sum(seen) < 3 * 100                  # not three fresh full budgets
     assert r.status == "RUN_FAIL"
+
+
+def test_reattach_backoff_cannot_overshoot_the_deadline(monkeypatch, tmp_path):
+    """The backoff sleep is clamped to what is left of run_timeout.
+
+    Review catch, 2026-08-03: the first version slept the full backoff
+    unconditionally, so the loop could run past run_timeout by up to one backoff
+    before returning 124. A wall-clock bound that is nearly right is worse than one
+    that is stated loosely, because it gets quoted as exact.
+    """
+    monkeypatch.setattr(fleet, "_scp_up", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(fleet, "_scp_down", lambda *a, **k: (0, ""))
+    clock = {"t": 500.0}
+    monkeypatch.setattr(fleet.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(fleet.time, "sleep",
+                        lambda s: clock.__setitem__("t", clock["t"] + s))
+
+    def ssh(key, host, port, cmd, timeout=120):
+        if "import run_farm" in cmd or "worker-ready" in cmd:
+            return (0, "/tmp/worker-ready")
+        clock["t"] += 95.0                     # burn nearly the whole 100s budget
+        return 255, "transport died"
+    monkeypatch.setattr(fleet, "_ssh", ssh)
+    prov = FakeProvider([_offer("a")])
+    leg = FleetLeg(label="L1", command="run.sh", ship=("driver.py",),
+                   reattachable=True)
+    start = clock["t"]
+    [r] = _exec(prov, tmp_path, run_timeout=100, reattach_backoff_s=60).run([leg])
+    # 95s burned leaves 5s; a full 60s backoff would end at +155. Clamped: +100.
+    assert clock["t"] - start <= 100, f"overshot run_timeout by {clock['t']-start-100}s"
+    assert r.status == "RUN_FAIL"

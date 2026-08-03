@@ -578,8 +578,14 @@ class FleetExecutor:
         ONE SHARED DEADLINE, not a fresh `run_timeout` per attempt. Per-attempt
         timeouts would multiply the billing window by `reattach_attempts` -- 2.5 h
         becoming 10 h on a box charged by the second -- and `run_timeout` is what
-        the caller's cost estimate is computed from. Backoff sleeps come out of the
-        same budget, so the wall-clock bound is unchanged by this feature.
+        the caller's cost estimate is computed from. Backoff sleeps are CLAMPED to
+        what is left of the deadline, so the bound holds for them too.
+
+        (That clamp was a review catch, 2026-08-03: the first version slept the full
+        backoff unconditionally, so the loop could overshoot `run_timeout` by up to
+        one backoff before returning 124 -- and the docstring claimed the bound was
+        "unchanged", which was then not quite true. Harmless at 9000 s against 20 s,
+        but a bound that is nearly right is the kind that gets quoted as exact.)
         """
         deadline = time.time() + self.run_timeout
         attempts = 1 + (self.reattach_attempts if leg.reattachable else 0)
@@ -600,12 +606,16 @@ class FleetExecutor:
                 # caller's normal path fails over to fresh hardware instead of
                 # reattaching to a corpse.
                 return rc, f"{out}  [host confirmed dead: {dead}]"
+            # Clamped to the deadline, and never negative: `left` was measured
+            # BEFORE the attempt ran, so `left - backoff` was not the remaining
+            # budget and could print as a negative number.
+            nap = min(self.reattach_backoff_s, max(0.0, deadline - time.time()))
             self._log(f"  {leg.label}: ssh transport died (rc={rc}) but host "
                       f"{host.id} is ALIVE -- reattaching "
-                      f"{i + 1}/{self.reattach_attempts} after "
-                      f"{self.reattach_backoff_s:.0f}s "
-                      f"({left - self.reattach_backoff_s:.0f}s of budget left)")
-            time.sleep(self.reattach_backoff_s)
+                      f"{i + 1}/{self.reattach_attempts} after {nap:.0f}s "
+                      f"({max(0.0, deadline - time.time() - nap):.0f}s "
+                      f"of budget left)")
+            time.sleep(nap)
         return rc, out
 
     def _host_dead(self, host_id: str) -> str | None:
