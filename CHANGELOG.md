@@ -6,7 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Working version is **0.2.1.dev0**. It read `0.2.0` — the same string PyPI serves —
+while the branch sat ten commits past the tag, so nothing distinguished a checkout from
+the published wheel. The four behaviour changes below are exactly what a downstream
+would silently have been missing, with no wrong number anywhere to show for it.
+
 ### Added
+- **Reattach on a dead ssh channel** (`fleet.py`): `FleetLeg.reattachable` (opt-in,
+  default off) plus `FleetExecutor(reattach_attempts=, reattach_backoff_s=)`. `rc 255`
+  is ssh's own transport code and never came from the payload, so over a host the
+  provider confirms alive it cannot mean the work failed. It was previously filed as a
+  terminal `RUN_FAIL`, which tore the box down under it — measured cost, a 5500-step
+  N=320 relaxation. All attempts share **one** `run_timeout` deadline, with the backoff
+  clamped to it, so retries cannot multiply the billing window.
+- **A budget cap that halts the campaign** (`protocols.py`, `fleet.py`):
+  `BudgetExceeded` moved beside the other failover signals and re-raised out of `run()`
+  instead of being buried by the catch-all as one `ERROR` per leg. Unstarted futures are
+  cancelled — propagation alone still let every queued leg call `rent()`, and a budget
+  halt that still rents is not a halt.
+- **`skip=` on the gauntlet** (`gauntlet.py`): `run_gauntlet` / `require_gauntlet` accept
+  it, and a skipped check is REPORTED as skipped rather than vanishing from the report.
+  Two checks had been telling callers to pass a parameter that did not exist.
 - `CITATION.cff`: version DOIs for **v0.1.1** (`10.5281/zenodo.21420305`) and **v0.2.0**
   (`10.5281/zenodo.21726314`). Both were minted and simply never recorded — v0.1.1's
   existence answers the open question of whether that tag ever got a GitHub Release: it

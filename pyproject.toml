@@ -4,7 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "run-farm"
-version = "0.2.0"
+# A .devN suffix on the WORKING version, not a release. Until 2026-08-03 this read
+# "0.2.0" while the checkout sat ten commits past the v0.2.0 tag -- and PyPI's
+# run-farm is also 0.2.0, so `pip list` showed the expected number for either one.
+# A downstream that meant to use the checkout and silently got the published wheel
+# had no observably wrong version anywhere: it surfaced as
+# `FleetLeg.__init__() got an unexpected keyword argument 'reattachable'` three
+# layers away, and only because that gap happened to be an API change. A
+# behaviour-only divergence would have been silent. Bump this whenever the tag is
+# behind the branch, so the number is the diagnosis rather than the disguise.
+#
+# CITATION.cff deliberately stays at 0.2.0: it describes the released, DOI-minted
+# artifact, and a .dev version is neither published nor citable.
+version = "0.2.1.dev0"
 description = "Checkpointed, config-hashed campaign runs over a rented GPU spot fleet: restart-exact registry, event records, probe-or-bail admission, and leak-proof cloud brokers (Vast/RunPod/Modal)."
 readme = "README.md"
 license = { text = "MIT" }
