@@ -241,3 +241,83 @@ def test_box_connections_carry_serveralive_keepalive(monkeypatch, tmp_path):
         assert "ServerAliveInterval=30" in joined, f"no keepalive: {argv}"
         assert "ServerAliveCountMax=4" in joined, f"no count-max: {argv}"
         assert "ConnectTimeout=15" in joined      # the setup bound is still there
+
+
+# --------------------------------------------------------------- remote env ----
+# `remote_env` exists because a non-interactive `ssh host cmd` sources no profile:
+# whatever the provider's onstart exported is NOT in the worker's environment. The
+# motivating case is XLA_FLAGS, which JAX reads when the backend initialises, so
+# setting it from inside the RunFn is already too late.
+
+def _capturing_ssh(seen):
+    """Record every command string, answering probe and worker normally."""
+    def fake_ssh(key, host, port, cmd, timeout=120):
+        seen.append(cmd)
+        if "import pkg.mod" in cmd:
+            return (0, "")
+        if "run_farm.worker" in cmd:
+            rec = {"run": "r", "result": {"ok": True}, "skipped": False}
+            return (0, RESULT_PREFIX + json.dumps(rec) + "\n")
+        return (0, "")
+    return fake_ssh
+
+
+def test_remote_env_reaches_the_worker_command(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pe.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pe, "_scp_down", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(pe, "_ssh", _capturing_ssh(seen))
+
+    ex = ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
+                          host_spec=SPEC, ready_timeout=1,
+                          remote_env={"XLA_FLAGS": "--xla_gpu_autotune_level=0"})
+    ex.run(CONFIGS)
+
+    worker_cmds = [c for c in seen if "run_farm.worker" in c]
+    assert worker_cmds, "the worker never ran"
+    for cmd in worker_cmds:
+        assert cmd.startswith("env "), f"env prefix missing: {cmd[:80]}"
+        # No shell metacharacters in this value, so shlex.quote leaves it bare.
+        assert "XLA_FLAGS=--xla_gpu_autotune_level=0 " in cmd
+
+
+def test_remote_env_also_applies_to_the_readiness_probe(monkeypatch):
+    """A var that breaks `import` must fail readiness, not every leg after it.
+
+    If the probe ran bare, a bad XLA_FLAGS would pass readiness and then fail the
+    engine on each config -- discovered at rental prices instead of at the probe.
+    """
+    seen = []
+    monkeypatch.setattr(pe.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pe, "_scp_down", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(pe, "_ssh", _capturing_ssh(seen))
+
+    ex = ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
+                          host_spec=SPEC, ready_timeout=1,
+                          remote_env={"XLA_FLAGS": "--xla_gpu_autotune_level=0"})
+    ex.run(CONFIGS)
+
+    probes = [c for c in seen if "import pkg.mod" in c]
+    assert probes, "readiness never probed"
+    assert all(c.startswith("env XLA_FLAGS=") for c in probes)
+
+
+def test_remote_env_values_are_shell_quoted():
+    """XLA_FLAGS is a space-separated list; unquoted, its tail becomes a command."""
+    ex = ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
+                          host_spec=SPEC,
+                          remote_env={"XLA_FLAGS": "--a=0 --b=1", "SAFE": "x"})
+    out = ex._envify("python -m thing")
+    # Both flags stay inside ONE argument.
+    assert "XLA_FLAGS='--a=0 --b=1'" in out
+    assert out.endswith("python -m thing")
+    # Sorted by key, so the command string is stable and diffable across runs.
+    assert out.index("SAFE=") < out.index("XLA_FLAGS=")
+
+
+def test_no_remote_env_leaves_the_command_untouched():
+    """The default path must not grow an `env` prefix -- this is the regression
+    guard for every existing consumer."""
+    ex = ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
+                          host_spec=SPEC)
+    assert ex._envify("python -m thing") == "python -m thing"

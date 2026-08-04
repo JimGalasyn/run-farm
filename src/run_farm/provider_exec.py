@@ -25,7 +25,7 @@ import shlex
 import subprocess
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from run_farm.protocols import (
     HostProbeFailed,
@@ -147,7 +147,8 @@ class ProviderExecutor:
                  ready_timeout: float = 900, run_timeout: float = 3600,
                  rent_timeout: float = 600, max_attempts: int = 12,
                  engine_module: str | None = None,
-                 config_class: ConfigClassRef | None = None):
+                 config_class: ConfigClassRef | None = None,
+                 remote_env: Mapping[str, str] | None = None):
         self.provider = provider
         # Readiness probes the RunFn's OWN module by default: if `pkg.mod:fn`
         # imports, both the engine AND the exact entry point the worker will call
@@ -173,6 +174,26 @@ class ProviderExecutor:
         # Cap the failover walk: trying 200 marginal offers at ready_timeout each
         # is a multi-day grind before giving up; bound it to the best N (#48).
         self.max_attempts = max_attempts
+        # Environment for the worker process on the box. It has to be applied HERE
+        # rather than in the provider's onstart: onstart configures the container,
+        # but the worker arrives over a separate non-interactive `ssh host cmd`,
+        # which sources no profile and inherits nothing onstart exported. An env
+        # var that must be read at process start -- XLA_FLAGS is the motivating
+        # case, since JAX reads it when the backend initialises and setting it from
+        # inside the RunFn is already too late -- is unreachable any other way.
+        self.remote_env = dict(remote_env or {})
+
+    def _envify(self, cmd: str) -> str:
+        """Prefix `cmd` with `env K=V ...` so the worker starts with `remote_env`.
+
+        Values are shell-quoted: XLA_FLAGS is a space-separated list, so an
+        unquoted value would split and the tail would be read as a command.
+        """
+        if not self.remote_env:
+            return cmd
+        assignments = " ".join(f"{k}={shlex.quote(v)}"
+                               for k, v in sorted(self.remote_env.items()))
+        return f"env {assignments} {cmd}"
 
     # -- per-host steps ------------------------------------------------------
     def _wait_engine_ready(self, host: RentedHost) -> None:
@@ -189,7 +210,11 @@ class ProviderExecutor:
         for the same verdict. Prefer an onstart that writes an explicit failure
         marker where you can. The asymmetry gets worse at grant scale, where
         `ready_timeout` is raised for slow engine installs."""
-        check = f"{self.remote_python} -c 'import {self.engine_module}'"
+        # Envified too, deliberately: the readiness probe should import the engine
+        # under the SAME environment the worker will run in, or a var that breaks
+        # import (a bad XLA_FLAGS is the obvious one) passes readiness and fails
+        # every leg afterwards -- at rental prices.
+        check = self._envify(f"{self.remote_python} -c 'import {self.engine_module}'")
         deadline = time.monotonic() + self.ready_timeout
         last = ""
         while time.monotonic() < deadline:
@@ -216,11 +241,12 @@ class ProviderExecutor:
 
     def _run_config(self, host: RentedHost, config: RunConfig) -> dict:
         """Run the worker for one config over SSH; parse its result record."""
-        cmd = (f"{self.remote_python} -m run_farm.worker "
-               f"--config-json {shlex.quote(config.to_json())} "
-               f"--run-fn {shlex.quote(self.run_fn_ref)} "
-               f"--config-class {shlex.quote(self._config_class_ref(config))} "
-               f"--work-dir {shlex.quote(self.remote_work_dir)}")
+        cmd = self._envify(
+            f"{self.remote_python} -m run_farm.worker "
+            f"--config-json {shlex.quote(config.to_json())} "
+            f"--run-fn {shlex.quote(self.run_fn_ref)} "
+            f"--config-class {shlex.quote(self._config_class_ref(config))} "
+            f"--work-dir {shlex.quote(self.remote_work_dir)}")
         rc, out = _ssh(self.key_path, host.ssh_host, host.ssh_port, cmd,
                        timeout=self.run_timeout)
         for line in out.splitlines():
