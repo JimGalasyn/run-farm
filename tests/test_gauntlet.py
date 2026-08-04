@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from run_farm import gauntlet as gt
 from run_farm.payload import PayloadSpec
 from run_farm.gauntlet import (CheckResult, GauntletError, OffersAvailable,
                                OutDirWritable, PayloadClosed, ProviderCapable,
@@ -263,3 +264,39 @@ def test_standard_gauntlet_end_to_end_passes_on_a_sound_setup(tmp_path):
     ), log=None)
     assert all(r.ok for r in results) and len(results) >= 5
     assert all(r.proves for r in results), "every check must state what it proves"
+
+
+# ------------------------------------------------------- remote-env pinned ----
+class _Exec:
+    def __init__(self, remote_env=None):
+        self.remote_env = dict(remote_env or {})
+
+
+_XLA = {"XLA_FLAGS": "--xla_gpu_autotune_level=0"}
+
+
+def test_remote_env_pinned_passes_when_set():
+    r = gt.RemoteEnvPinned(_Exec(_XLA), _XLA)()
+    assert r.ok and not r.blocking
+    assert "XLA_FLAGS" in r.detail and r.proves
+
+
+def test_remote_env_pinned_fails_when_missing():
+    """The silent failure this guards: every leg runs and only the claim is void."""
+    r = gt.RemoteEnvPinned(_Exec(), _XLA)()
+    assert not r.ok and r.blocking          # fatal by default
+    assert "missing: XLA_FLAGS" in r.detail
+
+
+def test_remote_env_pinned_fails_on_a_wrong_value():
+    """Set-but-wrong is the nastier case: it looks configured."""
+    r = gt.RemoteEnvPinned(_Exec({"XLA_FLAGS": "--xla_gpu_autotune_level=4"}), _XLA)()
+    assert not r.ok
+    assert "wrong: XLA_FLAGS=" in r.detail
+
+
+def test_remote_env_pinned_handles_an_executor_without_the_attribute():
+    """An older executor has no remote_env; that must read as MISSING, not crash --
+    a check that raises is reported as a failure, but a clear one is better."""
+    r = gt.RemoteEnvPinned(object(), _XLA)()
+    assert not r.ok and "missing: XLA_FLAGS" in r.detail

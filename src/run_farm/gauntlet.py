@@ -56,7 +56,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from run_farm.payload import PayloadSpec, validate_flat
@@ -376,6 +376,54 @@ class OutDirWritable:
         except OSError as e:
             return CheckResult(self.name, False, f"{self.path}: {e}", proves)
         return CheckResult(self.name, True, f"{self.path} writable", proves)
+
+
+class RemoteEnvPinned:
+    """The executor will actually ship the environment variables a campaign needs.
+
+    For variables the worker must see AT PROCESS START. `ProviderExecutor.remote_env`
+    is the only way to set those (a non-interactive `ssh host cmd` sources no profile,
+    so onstart's exports do not reach the worker), and forgetting it is silent: every
+    leg runs, produces plausible numbers, and only the reproducibility claim is void.
+
+    The motivating case is `XLA_FLAGS=--xla_gpu_autotune_level=0`. XLA GPU autotuning
+    selects kernels per process, so without it a resumed leg is not bit-identical to
+    an uninterrupted one -- measured at campaign scale, 1 divergence in 3 attempts,
+    73% of entries. A campaign that promises resume exactness while omitting this is
+    making a claim it cannot keep, and nothing downstream would notice.
+
+    Fatal by default: this guards a correctness property, not a convenience.
+    """
+
+    name = "remote-env-pinned"
+
+    def __init__(self, executor, required: Mapping[str, str], *, fatal: bool = True):
+        self.executor, self.required, self.fatal = executor, dict(required), fatal
+
+    def __call__(self) -> CheckResult:
+        proves = ("the executor is configured to ship these variables to the worker, "
+                  "with these values. Does NOT prove the box honours them, that the "
+                  "values are correct for this engine, or that they suffice for "
+                  "reproducibility -- only that what you meant to send is set to send.")
+        actual = dict(getattr(self.executor, "remote_env", {}) or {})
+        missing, wrong = [], []
+        for k, v in self.required.items():
+            if k not in actual:
+                missing.append(k)
+            elif actual[k] != v:
+                wrong.append(f"{k}={actual[k]!r} (wanted {v!r})")
+        if not missing and not wrong:
+            keys = ", ".join(sorted(self.required))
+            return CheckResult(self.name, True, f"remote_env pins {keys}", proves)
+        bits = []
+        if missing:
+            bits.append("missing: " + ", ".join(sorted(missing)))
+        if wrong:
+            bits.append("wrong: " + "; ".join(sorted(wrong)))
+        return CheckResult(
+            self.name, False,
+            " | ".join(bits) + " -- pass remote_env={...} to the executor",
+            proves, fatal=self.fatal)
 
 
 class ResumeMarkersIntended:

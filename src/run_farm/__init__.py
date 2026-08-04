@@ -68,6 +68,7 @@ from run_farm.gauntlet import (
     OutDirWritable,
     PayloadClosed,
     ProviderCapable,
+    RemoteEnvPinned,
     ResumeMarkersIntended,
     SshHandshake,
     SshKeyPresent,
@@ -158,7 +159,8 @@ __all__ = [
     "CheckResult", "GauntletError", "run_gauntlet", "require_gauntlet",
     "standard_gauntlet",
     "SshKeyPresent", "SshKeyRegistered", "SshHandshake", "PayloadClosed",
-    "OffersAvailable", "OutDirWritable", "ResumeMarkersIntended", "ProviderCapable",
+    "OffersAvailable", "OutDirWritable", "RemoteEnvPinned", "ResumeMarkersIntended",
+    "ProviderCapable",
     # provider diagnostics, with the GAPS named rather than silent
     "Diagnostics", "Gap", "capabilities", "collect", "explain_failure",
     # artifact arrival: verify what landed, publish so nothing sees it partial
