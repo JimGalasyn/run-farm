@@ -317,9 +317,19 @@ def main(argv=None) -> int:
         + ([f"label {args.label!r}"] if args.label is not None else [])
         + ([f"older-than {args.older_than}"] if older_than is not None else [])
     ) or "ALL live instances"
-    print(f"reap scope: {scope}")
+    # Name the provider in BOTH lines. `--provider` defaults to vast, so running
+    # `run-farm-reap --all --yes` after a RunPod campaign scans the wrong account and
+    # prints a confident all-clear while a pod bills -- observed 2026-08-04, a RunPod
+    # A5000 was RUNNING and visible via its own API at the moment this said there was
+    # nothing to reap. Worse, the unscoped wording is "ALL live instances", which reads
+    # as all-instances-everywhere rather than all-on-this-provider. This is the reap
+    # tool; a reassuring message from it is exactly the thing that must not be wrong.
+    print(f"reap scope: {scope} on {args.provider}")
     if not live:
-        print("no live instances -- nothing to reap."); return 0
+        print(f"no live instances on {args.provider} -- nothing to reap. "
+              f"(other providers are NOT checked; re-run with --provider "
+              f"{'runpod' if args.provider == 'vast' else 'vast'} to scan the other)")
+        return 0
     for i in live:
         lbl = _label_of(i)
         age = _instance_age_s(i)

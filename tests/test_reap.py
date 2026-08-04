@@ -456,3 +456,33 @@ def test_reap_no_relist_for_dry_run_or_unscoped():
     reap(p, label="f", dry_run=True, live=live)          # dry run -> no re-list
     reap(p, dry_run=False, live=live)                    # all-account -> no re-list
     assert p.list_calls == 1
+
+
+# --------------------------------------------------------- provider naming ----
+def test_all_clear_names_the_provider_it_scanned(monkeypatch, capsys):
+    """The all-clear must say WHICH account was scanned.
+
+    `--provider` defaults to vast, so `run-farm-reap --all --yes` after a RunPod
+    campaign scans the wrong account and prints a confident all-clear while a pod
+    bills. Observed 2026-08-04: a RunPod A5000 was RUNNING and visible via its own
+    API at the moment this printed "nothing to reap". This is the reap tool — a
+    reassuring message from it is exactly the one that must not be wrong.
+    """
+    from run_farm.reap import main
+    _patch_provider(monkeypatch, _FakeProvider([]))
+    rc = main(["--all", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "vast" in out                       # names the account it looked at
+    assert "runpod" in out                     # and points at the one it did not
+    assert "nothing to reap" in out
+
+
+def test_scope_line_is_qualified_by_provider(monkeypatch, capsys):
+    """'ALL live instances' reads as all-instances-everywhere; it is not."""
+    import run_farm.runpod as runpod
+    from run_farm.reap import main
+    monkeypatch.setattr(runpod, "RunPodProvider", lambda: _FakeProvider([]))
+    main(["--provider", "runpod", "--all", "--yes"])
+    out = capsys.readouterr().out
+    assert "reap scope: ALL live instances on runpod" in out
