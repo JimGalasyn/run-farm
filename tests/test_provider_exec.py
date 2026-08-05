@@ -321,3 +321,142 @@ def test_no_remote_env_leaves_the_command_untouched():
     ex = ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
                           host_spec=SPEC)
     assert ex._envify("python -m thing") == "python -m thing"
+
+
+# ------------------------------------------------- transport reattach (#2) ----
+# `run` already fails a config over when the provider CONFIRMS the host died. The
+# case left uncovered was the opposite one: rc=255 over a host that is still ALIVE,
+# recorded as a config error and lost with its checkpoint on a healthy box.
+
+def _flaky_ssh(script, seen=None):
+    """_ssh whose worker invocations return `script` in order; probes answer GONE."""
+    calls = {"worker": 0, "probe": 0}
+
+    def fake_ssh(key, host, port, cmd, timeout=120):
+        if seen is not None:
+            seen.append(cmd)
+        if "import pkg.mod" in cmd:
+            return (0, "")
+        if "pgrep" in cmd:
+            calls["probe"] += 1
+            return (0, "GONE\n")
+        if "run_farm.worker" in cmd:
+            i = calls["worker"]
+            calls["worker"] += 1
+            return script[min(i, len(script) - 1)]
+        return (0, "")
+    fake_ssh.calls = calls
+    return fake_ssh
+
+
+_OK = (0, RESULT_PREFIX + json.dumps(
+    {"run": "r", "result": {"ok": True}, "skipped": False}) + "\n")
+_TRANSPORT = (255, "ssh: connection closed by remote host")
+
+
+def _exec(monkeypatch, fake, **kw):
+    monkeypatch.setattr(pe.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pe, "_scp_down", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(pe, "_ssh", fake)
+    return ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
+                            host_spec=SPEC, ready_timeout=1, **kw)
+
+
+def test_transport_failure_is_retried_when_the_host_is_alive(monkeypatch):
+    """The bug: a dropped channel over a healthy box lost the leg."""
+    fake = _flaky_ssh([_TRANSPORT, _OK])
+    ex = _exec(monkeypatch, fake, reattach_attempts=2)
+    results = ex.run(CONFIGS[:1])
+    assert results[0]["result"] == {"ok": True}     # recovered, not lost
+    assert fake.calls["worker"] == 2                # reattached exactly once
+
+
+def test_reattach_is_off_by_default(monkeypatch):
+    """Existing consumers keep the old single-attempt behaviour byte-for-byte."""
+    fake = _flaky_ssh([_TRANSPORT, _OK])
+    ex = _exec(monkeypatch, fake)                   # no reattach_attempts
+    results = ex.run(CONFIGS[:1])
+    assert fake.calls["worker"] == 1                # did NOT retry
+    assert "rc=255" in results[0]["error"]
+
+
+def test_a_real_worker_failure_is_not_retried(monkeypatch):
+    """rc!=255 is the worker speaking. Trust it — retrying would hide a real bug."""
+    fail = (7, "Traceback: your RunFn raised")
+    fake = _flaky_ssh([fail, _OK])
+    ex = _exec(monkeypatch, fake, reattach_attempts=3)
+    results = ex.run(CONFIGS[:1])
+    assert fake.calls["worker"] == 1
+    assert "rc=7" in results[0]["error"]
+
+
+def test_no_second_worker_is_started_while_one_may_still_run(monkeypatch):
+    """The launch-if-not-already-running contract the worker CLI does not own.
+
+    Two workers interleaving checkpoints into one registry dir is unrecoverable;
+    a lost leg is not. So an ALIVE probe must decline to re-invoke.
+    """
+    def fake_ssh(key, host, port, cmd, timeout=120):
+        if "import pkg.mod" in cmd:
+            return (0, "")
+        if "pgrep" in cmd:
+            return (0, "ALIVE\n")               # a survivor is still running
+        if "run_farm.worker" in cmd:
+            fake_ssh.n += 1
+            return _TRANSPORT
+        return (0, "")
+    fake_ssh.n = 0
+
+    # Tiny backoff: `sleep` is a no-op under the fixture, so the wait budget is
+    # spent in real wall time. 0.01 keeps the whole wait under ~30ms.
+    ex = _exec(monkeypatch, fake_ssh, reattach_attempts=3,
+               reattach_backoff_s=0.01)
+    results = ex.run(CONFIGS[:1])
+    assert fake_ssh.n == 1, "started a second worker over a live one"
+    assert "declined to start a second one" in results[0]["error"]
+
+
+def test_confirmed_dead_host_stops_reattaching(monkeypatch):
+    """Don't reattach to a corpse — hand it back so `run` fails over."""
+    prov = FakeProvider([_offer("a"), _offer("b")], dead_ids={"a"})
+    fake = _flaky_ssh([_TRANSPORT, _OK])
+    monkeypatch.setattr(pe.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pe, "_scp_down", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(pe, "_ssh", fake)
+    ex = ProviderExecutor(prov, "pkg.mod:fn", LAUNCH, host_spec=SPEC,
+                          ready_timeout=1, reattach_attempts=3)
+    ex.run(CONFIGS[:1])
+    # One attempt on the dead host, then failover to offer b (which succeeds).
+    assert prov.rented == ["a", "b"]
+
+
+def test_reattach_shares_one_deadline_and_does_not_multiply_the_bill(monkeypatch):
+    """Per-attempt run_timeouts would multiply the billing window by the attempts.
+
+    `sleep` is deliberately NOT patched here, and the backoff is real-but-tiny, so
+    wall time genuinely advances between attempts. Without that the budget shrinks
+    only by nanoseconds and a per-attempt-timeout mutant passes — which it did on
+    the first version of this test.
+    """
+    fake = _flaky_ssh([_TRANSPORT, _TRANSPORT, _TRANSPORT])
+    seen = []
+    monkeypatch.setattr(pe, "_scp_down", lambda *a, **k: (0, ""))
+
+    def timing_ssh(key, host, port, cmd, timeout=120):
+        if "run_farm.worker" in cmd:
+            seen.append(timeout)
+        return fake(key, host, port, cmd, timeout)
+
+    monkeypatch.setattr(pe, "_ssh", timing_ssh)
+    backoff = 0.05
+    ex = ProviderExecutor(FakeProvider([_offer("a")]), "pkg.mod:fn", LAUNCH,
+                          host_spec=SPEC, ready_timeout=1, run_timeout=100,
+                          reattach_attempts=3, reattach_backoff_s=backoff)
+    ex.run(CONFIGS[:1])
+
+    assert len(seen) == 4, f"expected 1 + 3 reattaches, got {len(seen)}"
+    assert seen[0] <= 100
+    # STRICTLY decreasing, by at least one backoff each time: that is what
+    # distinguishes one shared deadline from a fresh run_timeout per attempt.
+    for a, b in zip(seen, seen[1:]):
+        assert b < a - backoff / 2, f"budget did not shrink across attempts: {seen}"
