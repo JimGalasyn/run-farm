@@ -148,7 +148,9 @@ class ProviderExecutor:
                  rent_timeout: float = 600, max_attempts: int = 12,
                  engine_module: str | None = None,
                  config_class: ConfigClassRef | None = None,
-                 remote_env: Mapping[str, str] | None = None):
+                 remote_env: Mapping[str, str] | None = None,
+                 reattach_attempts: int = 0,
+                 reattach_backoff_s: float = 20.0):
         self.provider = provider
         # Readiness probes the RunFn's OWN module by default: if `pkg.mod:fn`
         # imports, both the engine AND the exact entry point the worker will call
@@ -182,6 +184,14 @@ class ProviderExecutor:
         # case, since JAX reads it when the backend initialises and setting it from
         # inside the RunFn is already too late -- is unreachable any other way.
         self.remote_env = dict(remote_env or {})
+        # Reattach budget for an ssh channel that dies over a host that is still
+        # alive (#2). DEFAULT 0 = off, so existing consumers are byte-for-byte
+        # unchanged; `FleetExecutor` takes the same conservative stance via its
+        # per-leg `reattachable` flag. Safe to enable because the worker resumes
+        # from its checkpoint (`driver.execute_config`) and `_worker_gone` supplies
+        # the launch-if-not-already-running guard the worker CLI lacks.
+        self.reattach_attempts = max(0, reattach_attempts)
+        self.reattach_backoff_s = reattach_backoff_s
 
     def _envify(self, cmd: str) -> str:
         """Prefix `cmd` with `env K=V ...` so the worker starts with `remote_env`.
@@ -239,6 +249,102 @@ class ProviderExecutor:
         t = type(config)
         return self.config_class or f"{t.__module__}:{t.__qualname__}"
 
+    #: ssh's own exit code for "could not establish, or lost, the connection".
+    #: It did NOT come from the worker. Same constant, same meaning, as
+    #: `FleetExecutor.SSH_TRANSPORT_RC`.
+    SSH_TRANSPORT_RC = 255
+
+    #: Probe for a worker still running on the box. `ProviderExecutor` runs configs
+    #: SEQUENTIALLY on one host (`for c in configs` in `run`), so at most one worker
+    #: exists at a time and matching the module name is exact -- no need to thread a
+    #: run name through, which the config JSON does not expose anyway. The bracket
+    #: keeps pgrep's own pattern from matching the pgrep process.
+    _WORKER_PROBE = "pgrep -f 'run_farm[.]worker' >/dev/null && echo ALIVE || echo GONE"
+
+    def _worker_gone(self, host: RentedHost, budget_s: float) -> bool:
+        """Block until no worker runs on the box, or `budget_s` expires.
+
+        This is the `launch-if-not-already-running` contract that
+        `FleetLeg.reattachable` requires a re-enterable command to own. The worker
+        CLI does not own it -- it has no pidfile -- so the executor supplies it
+        here instead. Without this, re-invoking after a dropped channel could start
+        a SECOND worker racing a survivor, both writing the same registry dir.
+
+        Conservative on ambiguity: an ssh probe that fails (the box is unreachable,
+        which is why we are here) reports NOT gone, so we decline to re-invoke
+        rather than guess. A lost leg is recoverable; two workers interleaving
+        checkpoints is not.
+        """
+        deadline = time.time() + budget_s
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                return False
+            rc, out = _ssh(self.key_path, host.ssh_host, host.ssh_port,
+                           self._WORKER_PROBE, timeout=min(30.0, left))
+            if rc == 0 and "GONE" in out:
+                return True
+            nap = min(self.reattach_backoff_s, max(0.0, deadline - time.time()))
+            if nap <= 0:
+                return False
+            time.sleep(nap)
+
+    def _run_worker(self, host: RentedHost, cmd: str) -> tuple[int, str]:
+        """Run the worker command, REATTACHING if the ssh channel dies mid-run.
+
+        `rc == 255` is ssh's own transport failure, not the worker's exit code. With
+        the host still alive that says we lost the connection to a box that is still
+        there -- not the same statement as "the work failed". `run` already fails a
+        config over when the provider CONFIRMS the host died; the case left
+        uncovered was the opposite one, a live host and a dead channel, where the
+        leg was recorded as a config error and lost with its checkpoint sitting on a
+        perfectly healthy box (#2).
+
+        Re-invoking is safe because `driver.execute_config` is idempotent by
+        construction: it registers, skips when already complete, and otherwise
+        RESUMES from the last checkpoint. So a reattach continues the run rather
+        than restarting it -- provided no worker survived the channel, which
+        `_worker_gone` establishes.
+
+        ONE SHARED DEADLINE, as in `FleetExecutor`: per-attempt `run_timeout`s would
+        multiply the billing window by the attempt count on a box charged by the
+        second, and `run_timeout` is what the caller's cost estimate is built from.
+
+        Off by default (`reattach_attempts=0`), so existing consumers keep exactly
+        the previous single-attempt behaviour.
+        """
+        deadline = time.time() + self.run_timeout
+        attempts = 1 + self.reattach_attempts
+        rc, out = self.SSH_TRANSPORT_RC, "no attempt ran"
+        for i in range(attempts):
+            left = deadline - time.time()
+            if left <= 0:
+                return 124, (f"run_timeout {self.run_timeout}s exhausted across "
+                             f"{i} attempt(s); last: {out[-200:]}")
+            rc, out = _ssh(self.key_path, host.ssh_host, host.ssh_port, cmd,
+                           timeout=left)
+            if rc != self.SSH_TRANSPORT_RC:
+                return rc, out                       # the worker spoke; trust it
+            if i == attempts - 1:
+                break
+            dead = self._host_dead(host.id)
+            if dead:
+                # A corpse. Hand the transport rc back so `run`'s existing
+                # dead-host branch fails this over to fresh hardware.
+                return rc, f"{out}  [host confirmed dead: {dead}]"
+            if not self._worker_gone(host, min(self.reattach_backoff_s * 3,
+                                               max(0.0, deadline - time.time()))):
+                return rc, (f"{out}  [ssh transport died and a worker may still be "
+                            f"running on {host.id}; declined to start a second one]")
+            # Back off before re-invoking, CLAMPED to what is left of the deadline
+            # (as in `FleetExecutor._run_command`). Without a pause this would
+            # hammer a flapping connection as fast as ssh can fail, and the shared
+            # deadline would be spent on retries rather than on the work.
+            nap = min(self.reattach_backoff_s, max(0.0, deadline - time.time()))
+            if nap > 0:
+                time.sleep(nap)
+        return rc, out
+
     def _run_config(self, host: RentedHost, config: RunConfig) -> dict:
         """Run the worker for one config over SSH; parse its result record."""
         cmd = self._envify(
@@ -247,8 +353,7 @@ class ProviderExecutor:
             f"--run-fn {shlex.quote(self.run_fn_ref)} "
             f"--config-class {shlex.quote(self._config_class_ref(config))} "
             f"--work-dir {shlex.quote(self.remote_work_dir)}")
-        rc, out = _ssh(self.key_path, host.ssh_host, host.ssh_port, cmd,
-                       timeout=self.run_timeout)
+        rc, out = self._run_worker(host, cmd)
         for line in out.splitlines():
             if line.startswith(RESULT_PREFIX):
                 payload = line[len(RESULT_PREFIX):]
