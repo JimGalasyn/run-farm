@@ -6,12 +6,58 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Working version is **0.2.1.dev0**. It read `0.2.0` — the same string PyPI serves —
-while the branch sat ten commits past the tag, so nothing distinguished a checkout from
-the published wheel. The four behaviour changes below are exactly what a downstream
-would silently have been missing, with no wrong number anywhere to show for it.
+## [0.3.0] — The worker's environment, and a channel death that is not a work failure
+
+The version had read `0.2.0` — the same string PyPI serves — while the branch sat ten
+commits past the tag, so nothing distinguished a checkout from the published wheel. The
+behaviour changes below are exactly what a downstream would silently have been missing,
+with no wrong number anywhere to show for it. Confirmed on a second machine before this
+release: an editable install there reported **`0.1.1`**, two releases stale, and had been
+answering every `pip list` through a full GPU campaign.
+
+A minor bump rather than a patch: every item below is in `Added`, and this project's rule
+is *pre-1.0, minor = features*.
 
 ### Added
+- **The worker's environment** (`provider_exec.py`):
+  `ProviderExecutor(remote_env={...})` prefixes `env K=V …`, shell-quoted. It exists
+  because the worker arrives over a separate **non-interactive** `ssh host cmd`, which
+  sources no profile and inherits nothing the provider's onstart exported — so there was
+  no way to set a variable the worker must see **at process start**. `XLA_FLAGS` is the
+  motivating case: JAX reads it when the backend initialises, so setting it from inside a
+  RunFn is already too late, and XLA GPU autotuning picks kernels per process. Measured on
+  a Morphospace lineage at campaign scale, a cross-process resume diverged from the
+  uninterrupted run in **1 of 3 attempts, 14587/20000 entries**;
+  `--xla_gpu_autotune_level=0` makes it 5/5 identical. Applied to the readiness probe as
+  well as the worker, so a variable that breaks `import` fails at the probe rather than
+  once per leg at rental prices.
+- **`RemoteEnvPinned`** (`gauntlet.py`): fails the gauntlet before anything is rented when
+  the executor is not set to ship the variables a campaign needs. Worth a guard rather
+  than a convention precisely because forgetting it is **silent** — every leg still runs
+  and produces plausible numbers, and only the reproducibility claim is void. Checks
+  set-but-WRONG as well as missing; not added to `standard_gauntlet`, because a check that
+  defaults to requiring nothing could not fail.
+- **Reattach in `ProviderExecutor` too** (`provider_exec.py`): the structured-`RunFn` path
+  now makes the same transport-vs-work distinction `fleet.py` does.
+  `ProviderExecutor(reattach_attempts=, reattach_backoff_s=)`, off by default. The gap was
+  narrower than it looked — `run` **already** failed a config over when the provider
+  *confirmed* the host died; what was uncovered was the opposite case, `rc 255` over a host
+  still **alive**, recorded as a config error and lost with its checkpoint on a healthy
+  box. Unlike a `FleetLeg`, the worker CLI owns no *launch-if-not-already-running*
+  contract (it has no pidfile), so the executor supplies it: `_worker_gone` polls for a
+  surviving worker and declines to start a second one, conservative on an ambiguous probe.
+  Safe to re-invoke because `driver.execute_config` skips-if-complete else resumes.
+
+### Fixed
+- **`run-farm-reap` names the provider it scanned.** `--provider` defaults to `vast`, so
+  running it bare after a RunPod campaign printed a confident *"no live instances —
+  nothing to reap"* while a pod billed — observed 2026-08-04, with the pod `RUNNING` and
+  visible through its own API at that moment. The unscoped wording *"ALL live instances"*
+  compounded it by reading as all-instances-everywhere. Both lines now name the provider,
+  and the empty case points at the one that was **not** checked. This is the reap tool; a
+  reassuring message from it is the one that must not be wrong.
+
+### Added (from the prior working set)
 - **Reattach on a dead ssh channel** (`fleet.py`): `FleetLeg.reattachable` (opt-in,
   default off) plus `FleetExecutor(reattach_attempts=, reattach_backoff_s=)`. `rc 255`
   is ssh's own transport code and never came from the payload, so over a host the
