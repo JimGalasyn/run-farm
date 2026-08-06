@@ -27,8 +27,8 @@ robustness the farming session paid for is built in:
   - **resume**: a leg whose output already exists locally is skipped (#26), so a
     whole-leg failure also recovers on relaunch;
   - **launch jitter** so N legs don't fire N simultaneous DNS lookups (#29);
-  - **signal-safe teardown** (#24): a SIGTERM/SIGINT mid-run still destroys every
-    in-flight rental, a backstop to each `rent()`'s own best-effort teardown;
+  - **signal-safe teardown** (#24): a SIGTERM/SIGINT/SIGHUP mid-run still destroys
+    every in-flight rental, a backstop to each `rent()`'s own best-effort teardown;
   - **post-run reconciliation** (#48): `run()` sweeps any rental still tracked at
     the end (a teardown gap) before returning.
 
@@ -737,12 +737,22 @@ class FleetExecutor:
 
 
 class _SignalGuard:
-    """Context manager that, for its lifetime, makes SIGTERM/SIGINT tear down the
-    executor's live rentals before re-raising. Restores prior handlers on exit.
-    Only the MAIN thread can install signal handlers, so a guard requested from a
-    worker thread is a no-op (the run() that owns the threads installs it)."""
+    """Context manager that, for its lifetime, makes SIGTERM/SIGINT/SIGHUP tear
+    down the executor's live rentals before re-raising. Restores prior handlers on
+    exit. Only the MAIN thread can install signal handlers, so a guard requested
+    from a worker thread is a no-op (the run() that owns the threads installs it).
 
-    _SIGNALS = (signal.SIGTERM, signal.SIGINT)
+    SIGHUP is in the set because it is the signal a farm actually dies of. Its
+    default disposition is terminate, so an unhandled SIGHUP kills the interpreter
+    outright -- no `finally`, no teardown -- and every in-flight box bills until
+    someone notices. A driver run from a terminal, an ssh session, or an agent
+    shell takes SIGHUP when that session ends, which is precisely when nobody is
+    watching: a 5-box ladder orphaned this way idled ~10 h for ~$16.
+    """
+
+    # SIGHUP is POSIX-only; on Windows getattr yields None and it drops out.
+    _SIGNALS = tuple(s for s in (signal.SIGTERM, signal.SIGINT,
+                                 getattr(signal, "SIGHUP", None)) if s is not None)
 
     def __init__(self, executor: FleetExecutor):
         self._exec = executor

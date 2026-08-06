@@ -271,6 +271,32 @@ def test_signal_guard_installs_and_restores(tmp_path):
     assert signal.getsignal(signal.SIGTERM) is before                  # restored
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX-only signal")
+def test_signal_guard_covers_sighup(tmp_path):
+    """SIGHUP is the signal a farm dies of -- a session ending hangs up on the
+    driver, and its default disposition is terminate, so an unguarded SIGHUP
+    leaves every in-flight box billing."""
+    assert signal.SIGHUP in fleet._SignalGuard._SIGNALS
+    prov = FakeProvider([_offer("a")])
+    ex = _exec(prov, tmp_path)
+    before = signal.getsignal(signal.SIGHUP)
+    with ex._signal_guard():
+        assert signal.getsignal(signal.SIGHUP) not in (before, None)   # installed
+    assert signal.getsignal(signal.SIGHUP) is before                   # restored
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX-only signal")
+def test_sighup_destroys_live_rentals(tmp_path):
+    prov = FakeProvider([_offer("a")])
+    ex = _exec(prov, tmp_path)
+    ex._track("1000"); ex._track("1001")
+    guard = fleet._SignalGuard(ex)
+    guard._prev = {signal.SIGHUP: signal.SIG_DFL}       # not callable -> default
+    with pytest.raises(KeyboardInterrupt):
+        guard._handle(signal.SIGHUP, None)
+    assert set(prov.destroyed) == {"1000", "1001"}
+
+
 def test_signal_handler_destroys_then_chains(tmp_path):
     prov = FakeProvider([_offer("a")])
     ex = _exec(prov, tmp_path)
