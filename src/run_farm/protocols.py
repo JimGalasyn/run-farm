@@ -310,6 +310,14 @@ class HostSpec:
                                      # no GPU-sharing tenants). Guards against the
                                      # oversubscribed-shared-host thrash (load-36) that
                                      # silently starves a long run. 0 = no gate (default).
+    min_gpu_ram_mb: int = 0          # VRAM floor. A gpu_name is NOT a memory spec:
+                                     # "A100 SXM4" is sold as 40 GB AND 80 GB, and offers
+                                     # come back cheapest-first, so asking for an A100
+                                     # gets the 40 GB card. A run whose working set only
+                                     # fits the larger one has to say so, or it pays to
+                                     # provision the wrong hardware and OOMs (measured
+                                     # 2026-08-06: an N=320 leg OOMed on 24 GB needing
+                                     # 9.77 GiB more). 0 = no gate (default).
 
 
 @dataclasses.dataclass(frozen=True)

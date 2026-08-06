@@ -399,3 +399,47 @@ def test_launch_label_is_passed_to_create(mk):
     with c.rent(OFFER, LaunchSpec(image="img", onstart="cmd", label="farm-xyz")):
         pass
     assert seen["label"] == "farm-xyz"
+
+
+def test_offers_min_gpu_ram_gate(mk):
+    """min_gpu_ram_mb>0 adds the VRAM floor to the /bundles/ query; default omits it.
+
+    A gpu_name is not a memory spec -- "A100 SXM4" ships as 40 GB and 80 GB -- and
+    offers come back cheapest-first, so without this a request for an A100 reliably
+    returns the 40 GB card.
+    """
+    captured = {}
+    base = FakeVast()
+
+    def capture(method, url, key, payload=None, timeout=30, **kw):
+        if method == "POST" and "/bundles/" in url:
+            captured["q"] = payload
+        return base(method, url, key, payload, timeout, **kw)
+
+    prov = mk(capture)
+    base_spec = dict(gpu_name="RTX_3090", max_dph=0.30, min_reliability=0.9,
+                     min_inet_mbps=100, min_cuda=12.0)
+    prov.offers(HostSpec(**base_spec, min_gpu_ram_mb=81920))
+    assert captured["q"].get("gpu_ram") == {"gte": 81920}
+    captured.clear()
+    prov.offers(HostSpec(**base_spec))
+    assert "gpu_ram" not in captured["q"]          # default 0 -> query unchanged
+
+
+def test_offers_rechecks_vram_locally(mk):
+    """The API filter is trusted but not relied on. If the query key were silently
+    ignored, 40 GB cards would come back and pass -- which is the exact failure the
+    gate exists to prevent, so the adapter re-checks."""
+    base = FakeVast()
+    base.offers = [
+        dict(id=201, dph_total=0.15, gpu_name="A100 SXM4", num_gpus=1, gpu_ram=40960,
+             reliability2=0.99, inet_down=900, cuda_max_good=12.5, geolocation=", US"),
+        dict(id=202, dph_total=0.25, gpu_name="A100 SXM4", num_gpus=1, gpu_ram=81920,
+             reliability2=0.99, inet_down=900, cuda_max_good=12.5, geolocation=", US"),
+    ]
+    prov = mk(base)
+    spec = dict(gpu_name="A100_SXM4", max_dph=1.0, min_reliability=0.9,
+                min_inet_mbps=100, min_cuda=12.0)
+    got = prov.offers(HostSpec(**spec, min_gpu_ram_mb=81920))
+    assert [o.id for o in got] == ["202"]          # the 40 GB card is dropped
+    assert len(prov.offers(HostSpec(**spec))) == 2  # ungated: both survive

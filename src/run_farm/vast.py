@@ -234,6 +234,14 @@ class VastProvider:
         frac = getattr(spec, "min_gpu_frac", 0.0)       # dedicated-machine gate (anti-contention)
         if frac > 0:
             q["gpu_frac"] = {"gte": frac}
+        # VRAM floor. Vast sells "A100 SXM4" as both 40 GB and 80 GB under ONE
+        # gpu_name, and the ordering above is cheapest-first, so without this a
+        # request for an A100 reliably returns the 40 GB card -- the wrong hardware
+        # for a run sized to the 80 GB one, discovered only after paying to
+        # provision it.
+        vram = getattr(spec, "min_gpu_ram_mb", 0)
+        if vram > 0:
+            q["gpu_ram"] = {"gte": vram}
         raw = _req("POST", f"{V0}/bundles/", self.key, q).get("offers", [])
         return [
             Offer(id=str(o["id"]), dph=float(o["dph_total"]),
@@ -242,7 +250,11 @@ class VastProvider:
                   inet_down_mbps=float(o.get("inet_down", 0)),
                   cuda_max=float(o.get("cuda_max_good", 0)),
                   geolocation=o.get("geolocation", ""), provider=self.name)
-            for o in raw if o.get("dph_total", 1e9) <= spec.max_dph]
+            # the API filter is trusted but not relied on: re-check locally, because
+            # a silently-ignored query key would hand back 40 GB cards that pass.
+            for o in raw
+            if o.get("dph_total", 1e9) <= spec.max_dph
+            and (not vram or float(o.get("gpu_ram") or 0) >= vram)]
 
     def cheapest_offer(self, spec: HostSpec) -> Offer | None:
         offs = self.offers(spec)
