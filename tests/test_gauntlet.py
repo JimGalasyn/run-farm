@@ -300,3 +300,31 @@ def test_remote_env_pinned_handles_an_executor_without_the_attribute():
     a check that raises is reported as a failure, but a clear one is better."""
     r = gt.RemoteEnvPinned(object(), _XLA)()
     assert not r.ok and "missing: XLA_FLAGS" in r.detail
+
+
+# -- cap vs worst case ---------------------------------------------------------
+def test_cap_clears_worst_case_passes(tmp_path):
+    from run_farm.gauntlet import CapClearsWorstCase
+    r = CapClearsWorstCase(30.0, 25.62)()
+    assert r.ok and "25.62" in r.detail
+
+
+def test_cap_below_worst_case_warns_with_the_remedy():
+    """The real 2026-08-06 parameterisation: a $38 cap against a $45.75 worst
+    case. A cap under the worst case does not prevent overspend, it guarantees the
+    campaign dies partway through having already paid."""
+    from run_farm.gauntlet import CapClearsWorstCase
+    r = CapClearsWorstCase(38.0, 45.75)()
+    assert not r.ok
+    assert "abort mid-campaign" in r.detail
+    assert "45.75" in r.detail                     # names the number to clear
+    assert r.fatal is False                        # a tight cap can be deliberate
+
+
+def test_cap_check_counts_spend_already_on_the_ledger():
+    """A ledger that has already absorbed spend leaves less headroom, and the cap
+    is enforced against the running total, not against this campaign alone."""
+    from run_farm.gauntlet import CapClearsWorstCase
+    assert CapClearsWorstCase(26.0, 5.0, already_spent_usd=19.46)().ok
+    r = CapClearsWorstCase(20.0, 5.0, already_spent_usd=19.46)()
+    assert not r.ok and "19.46" in r.detail

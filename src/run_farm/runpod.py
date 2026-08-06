@@ -47,6 +47,10 @@ from run_farm.protocols import (
     Offer,
     RentedHost,
 )
+# The executor's own default key. Imported rather than duplicated so a pod is
+# always created with the key the executor will actually connect with; two copies
+# of this path would drift and the symptom would be an unexplained probe failure.
+from run_farm.provider_exec import DEFAULT_KEY
 
 REST = "https://rest.runpod.io/v1"
 GQL = "https://api.runpod.io/graphql"
@@ -142,9 +146,18 @@ class RunPodProvider:
                  min_cuda: float | None = None,
                  min_download_mbps: float | None = None,
                  data_center_ids: list[str] | None = None,
-                 volume_gb: int = 0):
+                 volume_gb: int = 0,
+                 pubkey_path: str | None = None):
         self.key = _read_key(api_key)
         self.ledger = ledger
+        # SSH public key to install on every pod. Vast registers a key ACCOUNT-side
+        # and injects it for us; RunPod does not -- a pod accepts only the keys it
+        # was created with, passed as env PUBLIC_KEY, which the base images append
+        # to authorized_keys. Without it every pod comes up RUNNING and then fails
+        # the executor's ssh probe, which reads as N dead hosts rather than one
+        # missing key (measured 2026-08-06: 4 pods, $2.54, all HostProbeFailed).
+        # Defaults to the executor's own key so the two cannot drift apart.
+        self.pubkey_path = pubkey_path or (DEFAULT_KEY + ".pub")
         self.cloud_type = cloud_type.upper()
         self.interruptible = interruptible
         self.data_center_ids = data_center_ids
@@ -160,6 +173,32 @@ class RunPodProvider:
     def _log(self, event: str, **fields) -> None:
         if self.ledger is not None:
             self.ledger.record(event, **fields)
+
+    def _pubkey(self) -> str:
+        """The ssh public key to install on a pod, or a loud failure.
+
+        Raising beats returning "" or omitting the env: a pod created without a key
+        is unreachable, and the executor reports that as HostProbeFailed per leg --
+        N identical failures on N billed pods, none of which names the cause.
+        """
+        p = Path(self.pubkey_path).expanduser()
+        try:
+            body = p.read_text().strip()
+        except OSError as e:
+            raise RunPodError(
+                f"cannot read ssh public key {p} ({e.__class__.__name__}). RunPod "
+                f"pods accept only the keys passed at create (env PUBLIC_KEY) -- "
+                f"unlike Vast, which injects an account-registered key -- so "
+                f"without this every pod comes up unreachable. Generate one "
+                f"(ssh-keygen -t ed25519 -f {str(p)[:-4]}) or pass "
+                f"pubkey_path=..."
+            ) from e
+        if not body.startswith(("ssh-", "ecdsa-")):
+            raise RunPodError(
+                f"{p} does not look like an ssh public key (starts {body[:20]!r}). "
+                f"This must be the .pub half; the private key would be installed "
+                f"as an authorized key and still not let anyone in.")
+        return body
 
     def _price_for_tier(self, g: dict) -> float | None:
         return g.get("communityPrice") if self.cloud_type == "COMMUNITY" \
@@ -222,7 +261,12 @@ class RunPodProvider:
         resources ... try a different machine' when the chosen host is full. That
         is transient capacity, not a bad request, and each retry may land on a
         different machine -- so retry it (unlike RunPod's per-type catalog, which
-        gives the executor nothing to fail over to). Other errors propagate."""
+        gives the executor nothing to fail over to). Other errors propagate.
+
+        The pod is created WITH the executor's ssh public key (env PUBLIC_KEY). A
+        missing key file raises HERE, before any pod is placed, because the
+        alternative is discovering it once per leg as a probe failure on a running,
+        billing pod."""
         body = {
             "name": launch.label,                        # attribution -> reap --label
             "imageName": launch.image,
@@ -237,6 +281,7 @@ class RunPodProvider:
             "interruptible": self.interruptible,
             "dockerStartCmd": ["bash", "-c", launch.onstart],
             "allowedCudaVersions": self._allowed_cuda(),
+            "env": {"PUBLIC_KEY": self._pubkey()},
         }
         if self._min_inet:
             body["minDownloadMbps"] = self._min_inet

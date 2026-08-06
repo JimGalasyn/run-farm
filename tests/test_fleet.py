@@ -5,6 +5,7 @@ resume/skip (#26), the NO_OFFERS / RUN_FAIL / NO_RESULT outcomes, and the
 signal-safe teardown backstop (#24).
 """
 
+import dataclasses
 import contextlib
 import signal
 import threading
@@ -992,3 +993,54 @@ def test_reattach_backoff_cannot_overshoot_the_deadline(monkeypatch, tmp_path):
     # 95s burned leaves 5s; a full 60s backoff would end at +155. Clamped: +100.
     assert clock["t"] - start <= 100, f"overshot run_timeout by {clock['t']-start-100}s"
     assert r.status == "RUN_FAIL"
+
+
+# -- payload verdict: "the marker arrived" is not "the job worked" -------------
+def test_verdict_none_keeps_the_old_behaviour(patched, tmp_path):
+    patched(ready=True)
+    prov = FakeProvider([_offer("a")])
+    leg = dataclasses.replace(_leg("L1"), verdict=None)
+    [r] = _exec(prov, tmp_path).run([leg])
+    assert r.status == "OK"
+
+
+def test_failing_verdict_becomes_run_fail_not_ok(patched, tmp_path):
+    """A leg whose payload did nothing must not report OK just because its marker
+    landed. RUN_FAIL rather than a new status: the work failed, and re-running it
+    on fresh hardware will not help."""
+    patched(ready=True)
+    prov = FakeProvider([_offer("a")])
+    leg = dataclasses.replace(_leg("L1"), verdict=lambda d: "diverged (NaN)")
+    [r] = _exec(prov, tmp_path).run([leg])
+    assert r.status == "RUN_FAIL" and not r.ok
+    assert "diverged (NaN)" in r.detail
+
+
+def test_verdict_receives_the_local_leg_dir(patched, tmp_path):
+    seen = {}
+    patched(ready=True)
+    prov = FakeProvider([_offer("a")])
+
+    def check(d):
+        seen["dir"] = d
+        return None
+
+    leg = dataclasses.replace(_leg("L1"), verdict=check)
+    [r] = _exec(prov, tmp_path).run([leg])
+    assert r.status == "OK"
+    assert seen["dir"] == tmp_path / "L1"          # where the fetch landed
+
+
+def test_raising_verdict_is_itself_a_verdict(patched, tmp_path):
+    """A checker that cannot read what the payload left behind has not certified
+    it. Swallowing the exception would restore the bug this seam exists to stop."""
+    patched(ready=True)
+    prov = FakeProvider([_offer("a")])
+
+    def boom(d):
+        raise ValueError("no manifest")
+
+    leg = dataclasses.replace(_leg("L1"), verdict=boom)
+    [r] = _exec(prov, tmp_path).run([leg])
+    assert r.status == "RUN_FAIL" and not r.ok
+    assert "ValueError" in r.detail and "no manifest" in r.detail

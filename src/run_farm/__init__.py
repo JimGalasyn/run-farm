@@ -64,6 +64,7 @@ from run_farm.payload import PayloadError, PayloadSpec, require_flat, validate_f
 from run_farm.gauntlet import (
     CheckResult,
     GauntletError,
+    CapClearsWorstCase,
     OffersAvailable,
     OutDirWritable,
     PayloadClosed,
@@ -159,7 +160,7 @@ __all__ = [
     "CheckResult", "GauntletError", "run_gauntlet", "require_gauntlet",
     "standard_gauntlet",
     "SshKeyPresent", "SshKeyRegistered", "SshHandshake", "PayloadClosed",
-    "OffersAvailable", "OutDirWritable", "RemoteEnvPinned", "ResumeMarkersIntended",
+    "CapClearsWorstCase", "OffersAvailable", "OutDirWritable", "RemoteEnvPinned", "ResumeMarkersIntended",
     "ProviderCapable",
     # provider diagnostics, with the GAPS named rather than silent
     "Diagnostics", "Gap", "capabilities", "collect", "explain_failure",

@@ -512,6 +512,56 @@ class ProviderCapable:
 
 
 # -------------------------------------------------------------- assembly ----
+class CapClearsWorstCase:
+    """The budget cap is above what this campaign could COST at its own timeout.
+
+    A cap below the worst case does not prevent overspend -- it guarantees the
+    campaign dies partway through, after paying for whatever ran. The money is
+    gone and there is no result, which is the one outcome worse than either
+    finishing or refusing to start.
+
+    Worst case is `n_legs * run_timeout_h * max_dph` plus acquisition tax, i.e.
+    every leg running to its timeout on the priciest host the spec allows -- not
+    the expected cost. That is the number the cap has to clear, because the cap
+    is enforced against actual spend as it accrues, and spend accrues at the
+    worst-case rate whenever things go badly.
+
+    Non-fatal: a deliberately tight cap on a campaign you intend to babysit is a
+    legitimate choice. It just must not be an accident.
+    """
+
+    name = "cap-clears-worst-case"
+
+    def __init__(self, cap_usd, worst_case_usd, *, already_spent_usd=0.0):
+        self.cap = float(cap_usd)
+        self.worst = float(worst_case_usd)
+        self.spent = float(already_spent_usd)
+
+    def __call__(self) -> CheckResult:
+        proves = ("the cap is above this campaign's own worst-case estimate, so a "
+                  "bad run stops by finishing rather than by hitting the cap. Does "
+                  "NOT bound real spend: the estimate is only as good as the "
+                  "timeout and price ceiling it was computed from.")
+        need = self.spent + self.worst
+        if self.cap >= need:
+            return CheckResult(self.name, True,
+                               f"cap ${self.cap:.2f} >= ${need:.2f} "
+                               f"(worst case ${self.worst:.2f}"
+                               + (f" + ${self.spent:.2f} already on this ledger)"
+                                  if self.spent else ")"),
+                               proves)
+        return CheckResult(
+            self.name, False,
+            f"cap ${self.cap:.2f} is BELOW the ${need:.2f} this campaign could "
+            f"cost (worst case ${self.worst:.2f}"
+            + (f" + ${self.spent:.2f} already on this ledger). " if self.spent
+               else "). ")
+            + f"It would abort mid-campaign having already paid. Raise the cap "
+              f"above ${need:.2f}, or lower the run-timeout / max-dph the estimate "
+              f"is computed from.",
+            proves, fatal=False)
+
+
 def standard_gauntlet(*, provider, host_spec, out_dir, key_path="~/.ssh/vastai",
                       payload: PayloadSpec | None = None, legs=(),
                       required_methods=("offers", "rent", "destroy"),

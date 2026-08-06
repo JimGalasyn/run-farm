@@ -310,6 +310,13 @@ class HostSpec:
                                      # no GPU-sharing tenants). Guards against the
                                      # oversubscribed-shared-host thrash (load-36) that
                                      # silently starves a long run. 0 = no gate (default).
+                                     # CAVEAT: 1.0 is reachable on SINGLE-GPU hosts and
+                                     # essentially never on A100/H100-class ones, which
+                                     # are multi-GPU servers where renting one GPU can
+                                     # never be the whole box. Pinned at 1.0 it does not
+                                     # protect a big-GPU campaign, it hides the market:
+                                     # measured 2026-08-06, A100 80GB returned 0 offers
+                                     # at frac=1.0 and 8 from $0.934 at frac=0.0.
     min_gpu_ram_mb: int = 0          # VRAM floor. A gpu_name is NOT a memory spec:
                                      # "A100 SXM4" is sold as 40 GB AND 80 GB, and offers
                                      # come back cheapest-first, so asking for an A100

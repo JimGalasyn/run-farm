@@ -285,3 +285,56 @@ def test_create_stamps_label_as_pod_name(mk):
     offs = p.offers(HostSpec(gpu_name="RTX_3090", max_dph=0.30, num_gpus=1))
     p.create(offs[0], LaunchSpec(image="img", onstart="x", label="my-farm"))
     assert f.last_create["name"] == "my-farm"            # reap --label attribution
+
+
+# -- ssh key provisioning ------------------------------------------------------
+# Vast registers a key ACCOUNT-side and injects it; RunPod does not. A pod accepts
+# only the keys passed at create, so omitting them yields N pods that come up
+# RUNNING and then fail the executor's probe -- N billed hosts, no cause named
+# (observed 2026-08-06: 4 pods, $2.54, every leg HostProbeFailed).
+
+def _pub(tmp_path, body="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 farm@host"):
+    p = tmp_path / "k.pub"
+    p.write_text(body + "\n")
+    return str(p)
+
+
+def test_create_installs_the_ssh_public_key(mk, tmp_path):
+    f = FakeRunPod()
+    p = mk(f)
+    p.pubkey_path = _pub(tmp_path)
+    offs = p.offers(HostSpec(gpu_name="RTX_3090", max_dph=0.30, num_gpus=1))
+    p.create(offs[0], LAUNCH)
+    env = f.last_create.get("env") or {}
+    assert env.get("PUBLIC_KEY", "").startswith("ssh-ed25519 AAAAC3")
+    assert env["PUBLIC_KEY"].endswith("farm@host")       # whole key, stripped
+
+
+def test_create_defaults_to_the_executors_own_key(mk):
+    """The pod must be created with the key the executor will CONNECT with; two
+    copies of that path would drift and the symptom would be a probe failure."""
+    from run_farm.provider_exec import DEFAULT_KEY
+    p = mk(FakeRunPod())
+    assert p.pubkey_path == DEFAULT_KEY + ".pub"
+
+
+def test_missing_public_key_raises_before_any_pod_is_placed(mk, tmp_path):
+    """Raising beats a pod that cannot be reached: the failure is one message
+    instead of one HostProbeFailed per billed leg."""
+    f = FakeRunPod()
+    p = mk(f)
+    p.pubkey_path = str(tmp_path / "nope.pub")
+    offs = p.offers(HostSpec(gpu_name="RTX_3090", max_dph=0.30, num_gpus=1))
+    with pytest.raises(RunPodError, match="cannot read ssh public key"):
+        p.create(offs[0], LAUNCH)
+    assert f.last_create is None                          # nothing was placed
+
+
+def test_private_key_is_rejected(mk, tmp_path):
+    """The .pub half specifically -- a private key installed as an authorized key
+    still lets nobody in, and would fail as a mystery probe error."""
+    p = mk(FakeRunPod())
+    p.pubkey_path = _pub(tmp_path, "-----BEGIN OPENSSH PRIVATE KEY-----")
+    offs = p.offers(HostSpec(gpu_name="RTX_3090", max_dph=0.30, num_gpus=1))
+    with pytest.raises(RunPodError, match="does not look like an ssh public key"):
+        p.create(offs[0], LAUNCH)

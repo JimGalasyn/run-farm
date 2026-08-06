@@ -52,7 +52,7 @@ import signal
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from run_farm.arrival import publish, verify_report
@@ -118,6 +118,19 @@ class FleetLeg:
     stream_progress: bool = False
     resumable: bool = False
     reattachable: bool = False
+    #: Did the PAYLOAD succeed? `(leg_dir: Path) -> None if it did, else a short
+    #: reason.` Consulted after the fetch, before a leg is ever called OK.
+    #:
+    #: This seam exists because "the marker arrived" and "the job worked" are
+    #: different claims, and every way of telling them apart is payload-specific:
+    #: run-farm knows `done_when` is a path, not what a exit code or a NaN looks
+    #: like inside it. Three real cases, all of which reached OK without it:
+    #:   - the marker said exit=1 (a 51-minute rental, reported OK)
+    #:   - an OOM left a one-sample manifest that scored as a passing measurement
+    #:   - the payload NaNed and exited 0, with a perfect marker
+    #: The first two are exit-code-visible and the third is not, so the check has
+    #: to be about the RESULT. None = no check, which is the old behaviour.
+    verdict: Callable[[Path], str | None] | None = None
 
     def marker(self) -> str:
         """The local relative path that signals this leg is complete."""
@@ -163,7 +176,14 @@ class LegResult:
     BAD_ARTIFACTS means the run finished and the fetch landed, but the files did
     not survive intact -- a transport fault, not a work failure. Kept distinct
     from RUN_FAIL because the remedy differs: re-fetch or re-run, versus fix the
-    job. It is NOT `ok`; the whole point is that this used to read as OK."""
+    job. It is NOT `ok`; the whole point is that this used to read as OK.
+
+    READ `ok` NARROWLY. It means the marker arrived and the bytes are intact --
+    a statement about TRANSPORT, not about work. Whether the payload did its job
+    is payload-specific and run-farm cannot see it: set `FleetLeg.verdict` and
+    this promotes to RUN_FAIL. Without one, `ok` has reported a leg whose marker
+    read exit=1, an OOM that produced a one-sample manifest, and a run that
+    NaNed and exited 0."""
 
     label: str
     status: str
@@ -286,6 +306,19 @@ class FleetExecutor:
     # -- resume (#26) --------------------------------------------------------
     def _leg_dir(self, leg: FleetLeg) -> Path:
         return self.local_out_dir / leg.label
+
+    def _payload_verdict(self, leg: FleetLeg) -> str | None:
+        """`leg.verdict` applied to the fetched output, or None if it passed.
+
+        A verdict that RAISES is itself a verdict: the checker could not read what
+        the payload left behind, and calling that OK would be the failure this
+        seam exists to stop. It is reported, not swallowed."""
+        if leg.verdict is None:
+            return None
+        try:
+            return leg.verdict(self._leg_dir(leg))
+        except Exception as e:                                 # noqa: BLE001
+            return f"verdict check raised {type(e).__name__}: {str(e)[:160]}"
 
     # -- observability -------------------------------------------------------
     def progress(self, leg: FleetLeg) -> dict[str, str] | None:
@@ -513,6 +546,14 @@ class FleetExecutor:
                             if bad is not None:
                                 return LegResult(leg.label, "BAD_ARTIFACTS",
                                                  host.id, bad)
+                            # The marker arrived and the bytes are intact. Neither
+                            # says the payload did its job -- see FleetLeg.verdict.
+                            # RUN_FAIL rather than a new status: the work failed,
+                            # and re-running it on new hardware will not help.
+                            why = self._payload_verdict(leg)
+                            if why is not None:
+                                return LegResult(leg.label, "RUN_FAIL", host.id,
+                                                 f"payload verdict: {why}")
                         return LegResult(leg.label, "OK" if done else "NO_RESULT",
                                          host.id)
                     finally:
