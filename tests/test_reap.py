@@ -1,4 +1,5 @@
 """Reaper logic: ledger-diff, targeting, idempotent/classified destroy. No network."""
+import pytest
 import json
 import time
 
@@ -475,7 +476,7 @@ def test_all_clear_names_the_provider_it_scanned(monkeypatch, capsys):
     assert rc == 0
     assert "vast" in out                       # names the account it looked at
     assert "runpod" in out                     # and points at the one it did not
-    assert "nothing to reap" in out
+    assert "nothing to destroy" in out
 
 
 def test_scope_line_is_qualified_by_provider(monkeypatch, capsys):
@@ -486,3 +487,117 @@ def test_scope_line_is_qualified_by_provider(monkeypatch, capsys):
     main(["--provider", "runpod", "--all", "--yes"])
     out = capsys.readouterr().out
     assert "reap scope: ALL live instances on runpod" in out
+
+
+# -- ledger self-healing: closing rows a dead driver never wrote ---------------
+def _rented(iid, ts, dph=0.3):
+    return {"event": "rented", "instance_id": iid, "ts": ts, "dph": dph,
+            "offer_id": f"o{iid}", "provider": "vast"}
+
+
+def _rows(path):
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+def test_reap_closes_row_for_instance_it_destroyed(tmp_path):
+    """A box reap kills gets a real `destroyed` row: provider.destroy() does not
+    touch the ledger, so without this the kill is invisible to the budget."""
+    from run_farm.reap import reap
+    old = time.time() - 3600
+    led = _ledger(tmp_path, [_rented(1, old, dph=0.4)])
+    rep = reap(_FakeProvider([1]), ledger=led, dry_run=False)
+    assert rep["destroyed"] == [1] and rep["closed"] == [1]
+    closed = [r for r in _rows(led) if r["event"] == "destroyed"]
+    assert len(closed) == 1
+    row = closed[0]
+    assert row["verify"] == "gone" and row["reconciled"] is True
+    assert row.get("cost_unknown") is None       # we watched it: cost is real
+    assert row["est_cost_usd"] == pytest.approx(0.4, rel=0.02)   # ~1 h at $0.40
+
+
+def test_reap_closes_vanished_row_with_cost_unknown(tmp_path):
+    """The phantom case: leaked per the ledger, absent from the live listing.
+    It is closed (so in-flight stops growing) but booked at 0 and flagged,
+    because when it died is not knowable from here."""
+    from run_farm.reap import reap
+    old = time.time() - 7200
+    led = _ledger(tmp_path, [_rented(7, old, dph=0.5)])
+    rep = reap(_FakeProvider([]), ledger=led, dry_run=False)   # nothing live
+    assert rep["targeted"] == 0 and rep["closed"] == [7]
+    row = [r for r in _rows(led) if r["event"] == "destroyed"][0]
+    assert row["verify"] == "gone" and row["cost_unknown"] is True
+    assert row["est_cost_usd"] == 0.0                  # never invent a number
+    assert row["est_cost_usd_upper_bound"] == pytest.approx(1.0, rel=0.02)
+
+
+def test_closing_stops_the_in_flight_phantom(tmp_path):
+    """The whole point: budget._in_flight_usd must read 0 afterwards."""
+    from run_farm.budget import _in_flight_usd
+    from run_farm.ledger import RentalLedger
+    from run_farm.reap import reap
+    old = time.time() - 36000                          # 10 h of phantom
+    led = _ledger(tmp_path, [_rented(1, old, dph=0.33), _rented(2, old, dph=0.33)])
+    before = _in_flight_usd(RentalLedger(led), time.time())
+    assert before > 6                                  # 2 boxes x 10 h x $0.33
+    reap(_FakeProvider([]), ledger=led, dry_run=False)
+    assert _in_flight_usd(RentalLedger(led), time.time()) == 0
+
+
+def test_reap_does_not_close_a_just_rented_box(tmp_path):
+    """Grace period. Vast can log `rented` before the box appears in
+    list_instances(); closing that row would mark a box gone as it starts
+    billing -- this module's own failure mode, inverted."""
+    from run_farm.reap import reap
+    led = _ledger(tmp_path, [_rented(9, time.time() - 5)])    # 5 s old
+    rep = reap(_FakeProvider([]), ledger=led, dry_run=False)
+    assert rep["closed"] == []
+    assert not [r for r in _rows(led) if r["event"] == "destroyed"]
+
+
+def test_dry_run_closes_nothing(tmp_path):
+    from run_farm.reap import reap
+    led = _ledger(tmp_path, [_rented(1, time.time() - 3600)])
+    rep = reap(_FakeProvider([1]), ledger=led, dry_run=True)
+    assert rep["closed"] == []
+    assert not [r for r in _rows(led) if r["event"] == "destroyed"]
+
+
+def test_close_ledger_false_opts_out(tmp_path):
+    from run_farm.reap import reap
+    led = _ledger(tmp_path, [_rented(1, time.time() - 3600)])
+    rep = reap(_FakeProvider([1]), ledger=led, dry_run=False, close_ledger=False)
+    assert rep["destroyed"] == [1] and rep["closed"] == []
+
+
+def test_closed_rows_are_idempotent(tmp_path):
+    """A second reap must not re-close what the first closed, or the ledger grows
+    a duplicate teardown every time anyone runs cleanup."""
+    from run_farm.reap import reap
+    led = _ledger(tmp_path, [_rented(1, time.time() - 3600)])
+    reap(_FakeProvider([]), ledger=led, dry_run=False)
+    rep2 = reap(_FakeProvider([]), ledger=led, dry_run=False)
+    assert rep2["closed"] == []
+    assert len([r for r in _rows(led) if r["event"] == "destroyed"]) == 1
+
+
+def test_cli_closes_rows_when_nothing_is_live(tmp_path, monkeypatch, capsys):
+    """`--ledger ... --yes` with an empty account must still repair the ledger.
+    The CLI used to return early on "nothing live" -- the exact state a phantom
+    leaves behind."""
+    from run_farm import reap as R
+    led = _ledger(tmp_path, [_rented(1, time.time() - 3600)])
+    monkeypatch.setattr(R, "_make_provider", lambda name: _FakeProvider([]))
+    rc = R.main(["--provider", "vast", "--ledger", str(led), "--yes"])
+    assert rc == 0
+    assert "closed 1 ledger row" in capsys.readouterr().out
+    assert R.leaked_ids(led) == set()
+
+
+def test_cli_still_returns_early_when_nothing_to_repair(tmp_path, monkeypatch, capsys):
+    from run_farm import reap as R
+    led = _ledger(tmp_path, [_rented(1, time.time() - 3600),
+                             {"event": "destroyed", "instance_id": 1,
+                              "verify": "gone"}])
+    monkeypatch.setattr(R, "_make_provider", lambda name: _FakeProvider([]))
+    assert R.main(["--provider", "vast", "--ledger", str(led), "--yes"]) == 0
+    assert "nothing to destroy" in capsys.readouterr().out

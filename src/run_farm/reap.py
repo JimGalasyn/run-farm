@@ -104,6 +104,93 @@ def leaked_ids(ledger_path: str | Path) -> set[str]:
     return seen - confirmed_gone
 
 
+#: A `rented` row younger than this is never closed as "already gone". Vast can
+#: log the rent before the instance appears in `list_instances()`, and without the
+#: grace period that race reads as a vanished box and closes a row for something
+#: that is about to start billing -- the exact failure this module exists to catch,
+#: inverted.
+_CLOSE_GRACE_S = 120.0
+
+
+def _rent_rows(ledger_path: str | Path) -> dict[str, dict]:
+    """instance id (str) -> its `rented` row, for cost reconstruction at close."""
+    out: dict[str, dict] = {}
+    p = Path(ledger_path)
+    if not p.exists():
+        return out
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") == "rented" and ev.get("instance_id") is not None:
+            out[str(ev["instance_id"])] = ev
+    return out
+
+
+def _close_ledger_rows(ledger_path, *, destroyed, vanished, dph_by_id, now) -> dict:
+    """Write the `destroyed` rows a dead driver never wrote.
+
+    This is the durable half of orphan recovery. `reap(ledger=...)` targets
+    leaked-AND-still-live instances, so a row that leaked and was then destroyed
+    OUTSIDE this ledger's knowledge is never a target and never gets closed --
+    and `budget._in_flight_usd` counts any unclosed `rented` row as still burning
+    at dph x elapsed-to-NOW. That phantom grows forever and eventually refuses
+    every rent against the ledger. Observed 2026-08-06: five rows left open by a
+    SIGHUP'd driver read as $21 of in-flight spend against a $12 campaign.
+
+    Two cases, and they are NOT costed the same way:
+
+      destroyed  we watched it live and killed it, so rent -> now at its dph is
+                 what Vast billed (Vast bills wall-clock rented -> destroyed).
+                 Booked as a real cost.
+      vanished   leaked per the ledger, absent from the live listing. It is gone
+                 -- that is what absence means -- but WHEN it went is unknowable
+                 from here. Booked as 0.0 with `cost_unknown: true` and the
+                 upper bound recorded alongside.
+
+    Booking a guess for `vanished` would be worse than either error it avoids: the
+    rent->now bound is the phantom itself (it can be days), and a silent non-zero
+    invention corrupts the one record that says what a campaign cost. Recording
+    "gone, cost unknown, at most $X" is the only honest option, and it stops the
+    phantom either way, which is the thing that was actually broken.
+    """
+    from run_farm.ledger import RentalLedger              # local: avoid a cycle
+
+    led = RentalLedger(ledger_path)
+    written = []
+    for iid in sorted(destroyed) + sorted(vanished):
+        known = iid in destroyed
+        rent = dph_by_id.get(iid) or {}
+        dph, ts = rent.get("dph"), rent.get("ts")
+        billed = round(now - ts, 1) if ts else None
+        cost = round(billed / 3600 * dph, 4) if (known and billed and dph) else 0.0
+        row = dict(
+            event="destroyed", instance_id=rent.get("instance_id", iid),
+            offer_id=rent.get("offer_id"), provider=rent.get("provider"),
+            outcome="ok", destroyed=True, verify="gone",
+            est_cost_usd=cost, reconciled=True,
+        )
+        if known:
+            row.update(billed_s=billed,
+                       reason="closed by reap: destroyed here, never recorded by "
+                              "the driver that rented it")
+        else:
+            row.update(billed_s=None, cost_unknown=True,
+                       billed_s_upper_bound=billed,
+                       est_cost_usd_upper_bound=(round(billed / 3600 * dph, 4)
+                                                 if billed and dph else None),
+                       reason="closed by reap: absent from the live listing, so "
+                              "gone, but destroyed outside this ledger -- its "
+                              "billed time is not recoverable from here")
+        led.record(row.pop("event"), **row)
+        written.append(row["instance_id"])
+    return {"closed": written}
+
+
 def _label_of(inst) -> str | None:
     """The campaign/run label stamped on an instance at create (`LaunchSpec.label`),
     read from the provider's raw record; None if absent. Robust to a fake/Instance
@@ -203,7 +290,8 @@ def _destroy_with_retry(provider, iid, retries: int = 4) -> str:
 
 def reap(provider, *, ledger: str | Path | None = None,
          label: str | None = None, older_than: float | None = None,
-         dry_run: bool = True, retries: int = 4, live=None) -> dict:
+         dry_run: bool = True, retries: int = 4, live=None,
+         close_ledger: bool = True) -> dict:
     """List live instances, destroy the targeted ones (unless dry_run).
 
     provider: anything with ``list_instances() -> [Instance(id,status,dph,raw)]``
@@ -219,6 +307,12 @@ def reap(provider, *, ledger: str | Path | None = None,
     is dropped -- never age-reaped). With no filter, the scope is every live
     instance. Returns a report dict; ``destroyed`` and ``gone`` are both successes
     (in the desired state), ``failed`` is the only error bucket.
+
+    ``close_ledger`` (default on, needs ``ledger`` and a real run) writes the
+    ``destroyed`` rows the driver never wrote -- both for what this call killed and
+    for rows that leaked and were destroyed elsewhere. Without it the ledger keeps
+    counting those as in-flight spend forever; see ``_close_ledger_rows``. The
+    ids it wrote come back as ``closed``.
     """
     if live is None:
         live = provider.list_instances()
@@ -247,8 +341,8 @@ def reap(provider, *, ledger: str | Path | None = None,
     dph_targeted = sum(float(getattr(i, "dph", 0) or 0) for i in targets)
 
     report = dict(live=len(live), targeted=len(targets), destroyed=[], gone=[],
-                  failed=[], dph_reclaimed=dph_targeted, dry_run=dry_run)
-    if dry_run or not targets:
+                  failed=[], closed=[], dph_reclaimed=dph_targeted, dry_run=dry_run)
+    if dry_run:
         return report                               # dry-run: dph_reclaimed = potential
     # actual reclaim sums ONLY confirmed-cleared boxes: a destroy that FAILED leaves
     # the box billing, so counting its dph would overstate savings exactly in the
@@ -260,6 +354,28 @@ def reap(provider, *, ledger: str | Path | None = None,
         if status in ("destroyed", "gone"):
             reclaimed += float(getattr(i, "dph", 0) or 0)
     report["dph_reclaimed"] = reclaimed
+
+    # NOT gated on `targets`: the rows that phantom hardest are precisely the ones
+    # with nothing to destroy -- leaked per the ledger, already gone on the cloud,
+    # so never a target and never closed. An early return on `not targets` is what
+    # let them accumulate.
+    if ledger is not None and close_ledger:
+        now = time.time()
+        rents = _rent_rows(ledger)
+        live_ids = {str(i.id) for i in live}
+        killed = {str(x) for x in report["destroyed"] + report["gone"]}
+        # Re-read: rows this call just closed by destroying are no longer leaked.
+        still_open = leaked_ids(ledger)
+        vanished = {
+            iid for iid in still_open - live_ids - killed
+            # the grace period keeps a just-rented box that has not surfaced in the
+            # provider's listing yet from being closed as though it had vanished
+            if (now - float(rents.get(iid, {}).get("ts") or 0)) > _CLOSE_GRACE_S
+        }
+        if killed or vanished:
+            report.update(_close_ledger_rows(ledger, destroyed=killed,
+                                             vanished=vanished, dph_by_id=rents,
+                                             now=now))
     return report
 
 
@@ -326,10 +442,19 @@ def main(argv=None) -> int:
     # tool; a reassuring message from it is exactly the thing that must not be wrong.
     print(f"reap scope: {scope} on {args.provider}")
     if not live:
-        print(f"no live instances on {args.provider} -- nothing to reap. "
+        print(f"no live instances on {args.provider} -- nothing to destroy. "
               f"(other providers are NOT checked; re-run with --provider "
               f"{'runpod' if args.provider == 'vast' else 'vast'} to scan the other)")
-        return 0
+        # NOT a return. "Nothing live" is precisely when a ledger can still be
+        # carrying open `rented` rows for boxes that died elsewhere, and those are
+        # what budget._in_flight_usd bills forever. Returning here would make the
+        # cleanup tool skip the one repair only it can do -- so fall through to
+        # reap(), which destroys nothing and closes the rows.
+        if not (args.yes and args.ledger is not None and leaked_ids(args.ledger)):
+            return 0
+        print(f"  ledger {args.ledger} still has "
+              f"{len(leaked_ids(args.ledger))} unclosed rental row(s) -- closing "
+              f"them so they stop counting as in-flight spend")
     for i in live:
         lbl = _label_of(i)
         age = _instance_age_s(i)
@@ -375,6 +500,12 @@ def main(argv=None) -> int:
     done = rep["destroyed"] + rep["gone"]
     print(f"cleared {len(done)} ({len(rep['destroyed'])} destroyed, "
           f"{len(rep['gone'])} already gone): {done}")
+    if rep["closed"]:
+        print(f"closed {len(rep['closed'])} ledger row(s) the driver never "
+              f"wrote: {rep['closed']}")
+        print("  they no longer count as in-flight spend. Rows for boxes that "
+              "died outside this ledger are booked at $0 with cost_unknown=true "
+              "and an upper bound, because when they died is not knowable here.")
     if rep["failed"]:
         print(f"FAILED {len(rep['failed'])}: {rep['failed']} -- re-run to retry.")
         return 1
