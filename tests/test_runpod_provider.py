@@ -85,12 +85,26 @@ class FakeRunPod:
 
 
 @pytest.fixture
-def mk(monkeypatch):
+def mk(monkeypatch, tmp_path):
+    """Build a provider whose ssh key is a real file inside `tmp_path`.
+
+    `pubkey_path` defaults to `~/.ssh/vastai.pub`, and `create` reads it to fill
+    `env.PUBLIC_KEY`. Every test below that reaches `create` therefore depended on
+    that file EXISTING ON THE DEVELOPER'S MACHINE — green locally, nine failures on
+    any CI runner, and the failure surfaces as `FileNotFoundError` inside
+    `_pubkey` rather than as anything about the behaviour under test.
+
+    Defaulted rather than passed per test, so a future `create` test cannot
+    reintroduce the dependency by forgetting it. Tests that are *about* key
+    resolution override `pubkey_path` explicitly and still exercise the real
+    lookup.
+    """
     monkeypatch.setenv("RUNPOD_API_KEY", "rpa_testkey")
     monkeypatch.setattr(runpod.time, "sleep", lambda s: None)
 
     def make(fake, **kw):
         monkeypatch.setattr(runpod, "_req", fake)
+        kw.setdefault("pubkey_path", _pub(tmp_path))
         return RunPodProvider(**kw)
     return make
 
@@ -211,7 +225,7 @@ def test_rent_tears_down_on_dead_status(mk, tmp_path):
     assert d["outcome"] == "host_failed" and d["verify"] == "gone"
 
 
-def test_create_retries_transient_capacity(monkeypatch):
+def test_create_retries_transient_capacity(monkeypatch, tmp_path):
     """A 'does not have the resources / try a different machine' 500 is transient
     capacity -> retried (each attempt may land on a different machine)."""
     monkeypatch.setattr(runpod.time, "sleep", lambda s: None)
@@ -227,18 +241,19 @@ def test_create_retries_transient_capacity(monkeypatch):
             return {"id": "pod9"}
         return {}
     monkeypatch.setattr(runpod, "_req", fake_req)
-    p = RunPodProvider(api_key="k")
+    p = RunPodProvider(api_key="k", pubkey_path=_pub(tmp_path))
     assert p.create(_offer(), LAUNCH) == "pod9" and calls["n"] == 3
 
 
-def test_create_raises_immediately_on_non_capacity_error(monkeypatch):
+def test_create_raises_immediately_on_non_capacity_error(monkeypatch, tmp_path):
     monkeypatch.setattr(runpod.time, "sleep", lambda s: None)
 
     def fake_req(method, url, key, payload=None, timeout=30):
         raise RunPodError("POST .../pods -> HTTP 401: unauthorized")
     monkeypatch.setattr(runpod, "_req", fake_req)
     with pytest.raises(RunPodError, match="401"):
-        RunPodProvider(api_key="k").create(_offer(), LAUNCH)
+        RunPodProvider(api_key="k",
+                       pubkey_path=_pub(tmp_path)).create(_offer(), LAUNCH)
 
 
 def test_read_key_from_file(tmp_path, monkeypatch):
@@ -310,12 +325,17 @@ def test_create_installs_the_ssh_public_key(mk, tmp_path):
     assert env["PUBLIC_KEY"].endswith("farm@host")       # whole key, stripped
 
 
-def test_create_defaults_to_the_executors_own_key(mk):
+def test_create_defaults_to_the_executors_own_key(monkeypatch):
     """The pod must be created with the key the executor will CONNECT with; two
-    copies of that path would drift and the symptom would be a probe failure."""
+    copies of that path would drift and the symptom would be a probe failure.
+
+    Built directly rather than through `mk`, which injects a temp key: this is the
+    one test whose subject IS the default, so a fixture supplying one would assert
+    the fixture. It reads no file, so it holds on a runner with no `~/.ssh`.
+    """
     from run_farm.provider_exec import DEFAULT_KEY
-    p = mk(FakeRunPod())
-    assert p.pubkey_path == DEFAULT_KEY + ".pub"
+    monkeypatch.setenv("RUNPOD_API_KEY", "rpa_testkey")
+    assert RunPodProvider().pubkey_path == DEFAULT_KEY + ".pub"
 
 
 def test_missing_public_key_raises_before_any_pod_is_placed(mk, tmp_path):
