@@ -60,6 +60,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from run_farm.payload import PayloadSpec, validate_flat
+from run_farm.protocols import RunHandle
 
 
 @dataclasses.dataclass(frozen=True)
@@ -393,6 +394,16 @@ class RemoteEnvPinned:
     making a claim it cannot keep, and nothing downstream would notice.
 
     Fatal by default: this guards a correctness property, not a convenience.
+
+    **What this check cannot reach: the RESOLVED state.** It proves the executor
+    is configured to ship a variable, which is the half that lives on this side of
+    the seam. It does not prove the variable had the effect it was set for -- that
+    the flag was understood, that the backend the engine actually resolved is the
+    intended one. Both halves fail silently and in the same way, so an engine whose
+    correctness depends on the *effect* should assert the effect next to its
+    `RunFn`, where the resolved state is visible: set-but-wrong and
+    right-by-accident both need to fail, and only the second is invisible today.
+    See `registry_gauntlet` for why that check belongs to the engine and not here.
     """
 
     name = "remote-env-pinned"
@@ -587,4 +598,167 @@ def standard_gauntlet(*, provider, host_spec, out_dir, key_path="~/.ssh/vastai",
         SshKeyRegistered(provider, key_path),
         OffersAvailable(provider, host_spec, minimum=minimum_offers),
     ]
+    return [c for c in checks if getattr(c, "name", None) not in set(skip)]
+
+
+# ------------------------------------------------------- registry path ----
+#
+# Everything above this line serves the FLEET path: rent hosts, ship a payload,
+# run `FleetLeg`s, resume off a `done_when` marker. `run_campaign` + a
+# `RunRegistry` is the other first-class path -- it is what both current
+# consumers drive -- and it had no gauntlet coverage at all. In particular
+# `ResumeMarkersIntended` is defined over `FleetLeg`s, so the one check whose
+# whole purpose is "a skip is a claim that work is already done, and deserves
+# the same scrutiny as a result" could not be run over half the library.
+#
+# The failure is identical on both paths. Only the marker differs: a `done_when`
+# file there, `RunRegistry.is_complete` here.
+
+
+class RunFnImportable:
+    """Fatal: the injected ``'module:function'`` reference actually resolves.
+
+    The registry path's analogue of `PayloadClosed`. A campaign whose `RunFn`
+    reference is stale — a renamed function, a module moved between packages, an
+    engine not installed in this environment — fails *identically on every leg*,
+    and there is no reason to pay for that discovery once per leg.
+
+    Distinct from `ImportReady`, which is a fleet *readiness predicate* run over
+    SSH against a rented box (`check(ssh, host)`). This one is local, free, and
+    runs before anything is rented or launched.
+    """
+
+    name = "runfn-importable"
+
+    def __init__(self, ref: str):
+        self.ref = ref
+
+    def __call__(self) -> CheckResult:
+        proves = (f"{self.ref} imports and is callable in THIS interpreter. Does "
+                  "NOT prove it runs, that its own imports are complete under a "
+                  "different working directory, or that it resolves on a worker "
+                  "— use `ImportReady` once you hold a host for that.")
+        # Local import: `run_farm.remote` pulls in the driver and the reference
+        # implementations, which the rest of this module does not need.
+        from run_farm.remote import load_run_fn
+        try:
+            load_run_fn(self.ref)
+        except Exception as exc:                                  # noqa: BLE001
+            return CheckResult(self.name, False,
+                               f"{type(exc).__name__}: {exc}", proves)
+        return CheckResult(self.name, True, f"{self.ref} resolves", proves)
+
+
+class RegistryMarkersIntended:
+    """Loud, non-fatal: which configs will PRE-SKIP, and how old their results are.
+
+    `ResumeMarkersIntended` for the registry path. Same motivating failure — a
+    leg reported `SKIP (output already present)` and that read as a pass, off a
+    marker left by a different run — and the same remedy: name every skip and its
+    age, so a result carried over from a previous campaign is visible rather than
+    inferred.
+
+    **Read-only, and that is load-bearing.** It does NOT call
+    `RunRegistry.register`, because registration writes a run directory and
+    appends a manifest line, and `run_campaign` deliberately defers both to the
+    worker that picks the config up ("at 10^4–10^6 scale an eager
+    ``[register(c) for c in configs]`` would serialize that many mkdir + manifest
+    appends on one node before any work starts"). A gauntlet check that
+    pre-registered would reintroduce exactly the cost the driver was written to
+    avoid, and would litter the output directory with runs that then never
+    happened. Instead it builds a `RunHandle` directly — `config.run_name()` is
+    part of the `RunConfig` protocol and is required to embed the config hash —
+    and asks the registry `is_complete`.
+
+    That keeps it correct for any `RunRegistry`, not just directory-backed ones.
+    Marker *age* is best-effort: it needs a real directory, so an object-store
+    registry reports the skip without a timestamp rather than failing.
+
+    `limit` bounds the scan. Completion is one stat (or one object-store head) per
+    config, which is cheap per item and not free at sweep scale; past the limit the
+    check reports how many it did not examine rather than silently covering less
+    than it appears to.
+    """
+
+    name = "registry-markers-intended"
+
+    def __init__(self, registry, configs: Iterable, out_dir: str | Path,
+                 limit: int = 2000):
+        self.registry = registry
+        self.configs = list(configs)
+        self.out_dir = Path(out_dir)
+        self.limit = int(limit)
+
+    def _handle(self, config) -> RunHandle:
+        name = config.run_name()
+        return RunHandle(config=config, dir=self.out_dir / name, name=name)
+
+    def __call__(self) -> CheckResult:
+        proves = ("names every config the registry already considers complete, "
+                  "and how old its result is where that is knowable. Does NOT "
+                  "prove those results came from the current parameters — the "
+                  "config hash covers the serialized config, so a run whose "
+                  "MEANING changed without its bytes changing still looks "
+                  "complete. Only a human can say the arm means what it meant.")
+        scanned = self.configs[:self.limit]
+        unscanned = len(self.configs) - len(scanned)
+        skipping = []
+        for config in scanned:
+            handle = self._handle(config)
+            try:
+                complete = self.registry.is_complete(handle)
+            except Exception as exc:                              # noqa: BLE001
+                return CheckResult(
+                    self.name, False,
+                    f"registry.is_complete raised for {handle.name}: "
+                    f"{type(exc).__name__}: {exc}", proves)
+            if not complete:
+                continue
+            age = ""
+            try:
+                if handle.dir.exists():
+                    age_h = (time.time() - handle.dir.stat().st_mtime) / 3600.0
+                    age = f", {age_h:.1f}h old"
+            except OSError:
+                pass
+            skipping.append(f"{handle.name}{age}")
+        tail = (f" ({unscanned} more not examined; raise `limit` to cover them)"
+                if unscanned else "")
+        if not skipping:
+            return CheckResult(self.name, True,
+                               f"no config pre-skips; all {len(scanned)} will "
+                               f"run{tail}", proves)
+        return CheckResult(
+            self.name, False,
+            f"{len(skipping)} of {len(scanned)} config(s) will be SKIPPED as "
+            f"already complete: " + "; ".join(skipping)
+            + f" — confirm these came from THIS campaign{tail}",
+            proves, fatal=False)
+
+
+def registry_gauntlet(*, registry, configs: Iterable, out_dir: str | Path,
+                      run_fn_ref: str | None = None,
+                      limit: int = 2000,
+                      skip: Sequence[str] = ()) -> list:
+    """The checks worth running before a `run_campaign`, cheapest-first.
+
+    The registry path's companion to `standard_gauntlet`, which cannot be reused:
+    that one is built around a provider, a host spec and an SSH key, none of which
+    a local or in-cluster campaign has. What both share is the shape — local and
+    free before anything expensive, and every check able to fail.
+
+    Deliberately NOT included, because they belong to the engine rather than to
+    the farm: whether the compute backend is the one the science requires. That is
+    a real and expensive failure — an arm run on the wrong backend returns
+    entirely plausible numbers and only its reproducibility claim is void — but
+    run-farm cannot know what backend an engine needs, and a check that defaults
+    to requiring nothing could not fail. Write it next to the `RunFn`, and make it
+    assert the RESOLVED state and not merely the variable that was meant to set
+    it: set-but-wrong and right-by-accident both need to fail. `RemoteEnvPinned`
+    covers the shipping half of that on the fleet path.
+    """
+    checks = [OutDirWritable(out_dir)]
+    if run_fn_ref is not None:
+        checks.append(RunFnImportable(run_fn_ref))
+    checks.append(RegistryMarkersIntended(registry, configs, out_dir, limit=limit))
     return [c for c in checks if getattr(c, "name", None) not in set(skip)]

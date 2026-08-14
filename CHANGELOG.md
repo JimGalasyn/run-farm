@@ -22,6 +22,46 @@ All notable changes to this project are documented here. The format follows
   since its subject is the default and a fixture supplying one would assert the fixture.
   Verified by hiding `$HOME`: 377 passed with and without it, against 9 failures before.
 
+### Added
+- **The gauntlet reaches the registry path** (`gauntlet.py`). Everything in that module
+  served the FLEET path — rent hosts, ship a payload, run `FleetLeg`s, resume off a
+  `done_when` marker. `run_campaign` + a `RunRegistry` is the library's other first-class
+  path and had **no gauntlet coverage at all**, which meant `ResumeMarkersIntended` —
+  the check whose whole purpose is *a skip is a claim that work is already done and
+  deserves the same scrutiny as a result* — could not be run over half the library. The
+  failure is identical on both paths; only the marker differs.
+  - **`RegistryMarkersIntended`**: names every config the registry already considers
+    complete, with its age. **Read-only, deliberately**: it does not call
+    `register`, because that writes a run dir and a manifest line, and `run_campaign`
+    defers both to the worker on purpose ("at 10^4–10^6 scale an eager
+    `[register(c) for c in configs]` would serialize that many mkdir + manifest appends
+    on one node"). A pre-registering check would reintroduce exactly that cost and
+    litter the output directory with runs that never happen. It builds a `RunHandle`
+    from `config.run_name()` — protocol-guaranteed to embed the config hash — and asks
+    `is_complete`, so it is correct for any registry, not just directory-backed ones.
+    Age is best-effort; an object-store registry reports the skip without a timestamp
+    rather than failing. `is_complete` raising is **fatal**, because unknown skip state
+    is not the same as no skips.
+  - **`RunFnImportable`**: the registry path's analogue of `PayloadClosed`. A stale
+    `'module:function'` reference fails identically on every leg, and there is no reason
+    to discover that once per leg. Distinct from `ImportReady`, which is a fleet
+    *readiness predicate* run over SSH against a rented box.
+  - **`registry_gauntlet`**: the companion to `standard_gauntlet`, which cannot be
+    reused — it is built around a provider, a host spec and an SSH key, none of which a
+    local or in-cluster campaign has.
+- **`RemoteEnvPinned` now documents what it cannot reach** (`gauntlet.py`): the RESOLVED
+  state. It proves the executor is configured to *ship* a variable, not that the variable
+  had the effect it was set for. Both halves fail silently and identically. An engine
+  whose correctness depends on the effect should assert the effect next to its `RunFn` —
+  set-but-wrong and right-by-accident both need to fail, and only the second is invisible
+  today. Not added as a check here: run-farm cannot know what backend an engine needs, and
+  a check that defaults to requiring nothing could not fail.
+
+Found while farming a Morphospace calibration sweep, where the engine's own arm is
+reproducible only on CPU: run it on the GPU and every leg returns entirely plausible
+numbers whose reproducibility claim is void. That check belongs to the engine, but the
+two above did not, and neither existed.
+
 ## [0.3.0] — The worker's environment, and a channel death that is not a work failure
 
 The version had read `0.2.0` — the same string PyPI serves — while the branch sat ten

@@ -7,6 +7,8 @@ failure, and the reason an API call must never stand in for an SSH test.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -19,7 +21,7 @@ from run_farm.gauntlet import (CheckResult, GauntletError, OffersAvailable,
                                ResumeMarkersIntended, SshKeyPresent,
                                SshKeyRegistered, require_gauntlet, run_gauntlet,
                                standard_gauntlet)
-from run_farm.protocols import HostSpec, Offer
+from run_farm.protocols import HostSpec, Offer, RunHandle
 
 
 def _keypair(tmp_path, name="vastai"):
@@ -328,3 +330,157 @@ def test_cap_check_counts_spend_already_on_the_ledger():
     assert CapClearsWorstCase(26.0, 5.0, already_spent_usd=19.46)().ok
     r = CapClearsWorstCase(20.0, 5.0, already_spent_usd=19.46)()
     assert not r.ok and "19.46" in r.detail
+
+
+# ------------------------------------------------------- registry path ----
+#
+# The load-bearing test in this section is
+# `test_a_registry_skip_is_reported_rather_than_silent`: it is the same failure
+# `ResumeMarkersIntended` exists for -- a skip reading as a pass -- on the path
+# that had no check for it.
+
+
+class _Cfg:
+    """Minimal `RunConfig`: the registry path needs only identity from it."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.dtype = "float32"
+        self.params = {}
+
+    def to_json(self):
+        return json.dumps({"tag": self.tag}, sort_keys=True)
+
+    def config_hash(self, n=12):
+        return hashlib.sha256(self.to_json().encode()).hexdigest()[:n]
+
+    def run_name(self):
+        return f"run_{self.tag}_{self.config_hash()}"
+
+
+class _Registry:
+    """`RunRegistry` stub. Records whether `register` was ever called, because
+    the check promising to be read-only is only worth having if that is tested."""
+
+    def __init__(self, complete=(), raises=False):
+        self.complete = set(complete)
+        self.raises = raises
+        self.registered = []
+
+    def register(self, config):
+        self.registered.append(config)
+        return RunHandle(config=config, dir=Path("/nonexistent"),
+                         name=config.run_name())
+
+    def is_complete(self, handle):
+        if self.raises:
+            raise RuntimeError("registry unreachable")
+        return handle.name in self.complete
+
+
+def test_no_registry_skip_passes_and_says_how_many_will_run(tmp_path):
+    cfgs = [_Cfg("a"), _Cfg("b")]
+    r = _Registry()
+    res = gt.RegistryMarkersIntended(r, cfgs, tmp_path)()
+    assert res.ok and "all 2 will run" in res.detail
+    assert res.proves
+
+
+def test_a_registry_skip_is_reported_rather_than_silent(tmp_path):
+    """THE one. A skip is a claim that work is already done; it must be named."""
+    cfgs = [_Cfg("a"), _Cfg("b")]
+    r = _Registry(complete={cfgs[1].run_name()})
+    res = gt.RegistryMarkersIntended(r, cfgs, tmp_path)()
+    assert not res.ok
+    assert not res.fatal          # loud, but a human may legitimately accept it
+    assert cfgs[1].run_name() in res.detail
+    assert "SKIPPED" in res.detail
+    assert cfgs[0].run_name() not in res.detail
+
+
+def test_the_check_never_registers_anything(tmp_path):
+    """Read-only is load-bearing: `run_campaign` defers registration to the
+    worker on purpose, and a check that pre-registered would both reintroduce
+    that cost and create run dirs for work that never happens."""
+    cfgs = [_Cfg("a"), _Cfg("b")]
+    r = _Registry(complete={cfgs[0].run_name()})
+    gt.RegistryMarkersIntended(r, cfgs, tmp_path)()
+    assert r.registered == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_marker_age_is_reported_when_the_run_dir_is_real(tmp_path):
+    cfg = _Cfg("a")
+    (tmp_path / cfg.run_name()).mkdir()
+    r = _Registry(complete={cfg.run_name()})
+    res = gt.RegistryMarkersIntended(r, [cfg], tmp_path)()
+    assert not res.ok and "h old" in res.detail
+
+
+def test_a_registry_without_directories_still_reports_the_skip(tmp_path):
+    """Age is best-effort; the skip itself is not. An object-store registry has
+    no mtime to read and must still name what it will skip."""
+    cfg = _Cfg("a")
+    r = _Registry(complete={cfg.run_name()})
+    res = gt.RegistryMarkersIntended(r, [cfg], tmp_path / "absent")()
+    assert not res.ok and cfg.run_name() in res.detail and "h old" not in res.detail
+
+
+def test_an_unreachable_registry_fails_fatally(tmp_path):
+    """`is_complete` raising means the skip state is UNKNOWN, which is not the
+    same as 'nothing will skip' and must not be reported as a pass."""
+    res = gt.RegistryMarkersIntended(_Registry(raises=True), [_Cfg("a")], tmp_path)()
+    assert not res.ok and res.fatal and "unreachable" in res.detail
+
+
+def test_limit_says_what_it_did_not_examine(tmp_path):
+    cfgs = [_Cfg(str(i)) for i in range(5)]
+    res = gt.RegistryMarkersIntended(_Registry(), cfgs, tmp_path, limit=2)()
+    assert res.ok and "3 more not examined" in res.detail
+
+
+def test_runfn_importable_passes_on_a_real_run_fn():
+    """Pointed at an actual shipped `RunFn`, not a maybe-present one: a check
+    whose positive case can skip itself proves nothing about the positive case."""
+    res = gt.RunFnImportable("run_farm.testing:echo_run_fn")()
+    assert res.ok, res.detail
+    assert "resolves" in res.detail
+
+
+@pytest.mark.parametrize("ref", ["run_farm.nope:missing",
+                                 "run_farm.gauntlet:no_such_function"])
+def test_a_stale_runfn_reference_fails_before_launch(ref):
+    """Otherwise this fails identically on every leg, at rental prices."""
+    res = gt.RunFnImportable(ref)()
+    assert not res.ok and res.fatal
+    assert res.proves and "Does NOT prove" in res.proves
+
+
+def test_a_non_callable_runfn_reference_fails():
+    """`load_run_fn` raises TypeError rather than returning a non-callable, and
+    the check must surface that as a failure and not an exception."""
+    res = gt.RunFnImportable("run_farm.gauntlet:__doc__")()
+    assert not res.ok and res.fatal
+
+
+def test_registry_gauntlet_covers_the_path_and_skips_by_name(tmp_path):
+    cfgs = [_Cfg("a")]
+    checks = gt.registry_gauntlet(registry=_Registry(), configs=cfgs,
+                                  out_dir=tmp_path,
+                                  run_fn_ref="run_farm.gauntlet:require_gauntlet")
+    names = [c.name for c in checks]
+    assert names == ["out-dir-writable", "runfn-importable",
+                     "registry-markers-intended"]
+    dropped = gt.registry_gauntlet(registry=_Registry(), configs=cfgs,
+                                   out_dir=tmp_path,
+                                   skip=("registry-markers-intended",))
+    assert [c.name for c in dropped] == ["out-dir-writable"]
+
+
+def test_registry_gauntlet_runs_green_end_to_end(tmp_path):
+    checks = gt.registry_gauntlet(registry=_Registry(), configs=[_Cfg("a")],
+                                  out_dir=tmp_path,
+                                  run_fn_ref="run_farm.gauntlet:require_gauntlet")
+    results = gt.run_gauntlet(checks)
+    assert all(r.ok for r in results), [str(r) for r in results]
+    assert all(r.proves for r in results)
