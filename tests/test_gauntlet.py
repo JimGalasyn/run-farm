@@ -484,3 +484,88 @@ def test_registry_gauntlet_runs_green_end_to_end(tmp_path):
     results = gt.run_gauntlet(checks)
     assert all(r.ok for r in results), [str(r) for r in results]
     assert all(r.proves for r in results)
+
+
+class _DirKeyedRegistry:
+    """Mimics `FileRunRegistry` exactly: completion resolves through `handle.dir`.
+
+    The point of the class is the contrast with `_Registry` above, which keys off
+    `handle.name` the way `ObjectStoreRunRegistry` does. The two disagree, and a
+    handle built under the wrong directory is invisible to only one of them.
+    """
+
+    def __init__(self, base):
+        self.base = Path(base)
+
+    def register(self, config):
+        d = self.base / config.run_name()
+        d.mkdir(parents=True, exist_ok=True)
+        return RunHandle(config=config, dir=d, name=config.run_name())
+
+    def finish(self, handle, result):
+        handle.dir.mkdir(parents=True, exist_ok=True)
+        (handle.dir / "DONE.json").write_text(json.dumps(result))
+
+    def is_complete(self, handle):
+        return (handle.dir / "DONE.json").exists()
+
+
+def test_a_dir_keyed_registry_reports_its_skip_when_the_base_matches(tmp_path):
+    base = tmp_path / "campaign_out"
+    reg = _DirKeyedRegistry(base)
+    cfgs = [_Cfg("a"), _Cfg("b")]
+    reg.finish(reg.register(cfgs[1]), {"ok": True})
+    res = gt.RegistryMarkersIntended(reg, cfgs, base)()
+    assert not res.ok and not res.fatal
+    assert cfgs[1].run_name() in res.detail
+
+
+def test_a_base_mismatch_fails_instead_of_passing_cleanly(tmp_path):
+    """REGRESSION. `FileRunRegistry.is_complete` reads `handle.dir`, so a handle
+    built under a different directory makes every finished run report unfinished
+    and this check returned a clean pass — a false all-clear on precisely the
+    failure it exists to catch. Worse than the unreachable-registry case, which is
+    already fatal: unknown skip state is loud, wrong skip state is silent.
+    """
+    base = tmp_path / "campaign_out"
+    reg = _DirKeyedRegistry(base)
+    cfgs = [_Cfg("a"), _Cfg("b")]
+    reg.finish(reg.register(cfgs[1]), {"ok": True})
+    assert reg.is_complete(reg.register(cfgs[1]))     # the run really is complete
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    res = gt.RegistryMarkersIntended(reg, cfgs, elsewhere)()
+    assert not res.ok and res.fatal, "a base mismatch must not read as a pass"
+    assert "not the registry's base" in res.detail
+
+
+def test_a_name_keyed_registry_is_unaffected_by_the_directory(tmp_path):
+    """The asymmetry that made the bug easy to miss: an object-store registry
+    keys off `handle.name`, so it never had the problem. `_Registry` exposes no
+    `base`, so the guard stays quiet rather than inventing a mismatch."""
+    cfgs = [_Cfg("a")]
+    r = _Registry(complete={cfgs[0].run_name()})
+    res = gt.RegistryMarkersIntended(r, cfgs, tmp_path / "anywhere")()
+    assert not res.ok and not res.fatal
+    assert cfgs[0].run_name() in res.detail
+
+
+def test_handle_for_overrides_the_layout_and_suppresses_the_base_guard(tmp_path):
+    base = tmp_path / "campaign_out"
+    reg = _DirKeyedRegistry(base)
+    cfgs = [_Cfg("a")]
+    reg.finish(reg.register(cfgs[0]), {"ok": True})
+    res = gt.RegistryMarkersIntended(
+        reg, cfgs, tmp_path / "irrelevant",
+        handle_for=lambda c: RunHandle(config=c, dir=base / c.run_name(),
+                                       name=c.run_name()))()
+    assert not res.ok and not res.fatal
+    assert cfgs[0].run_name() in res.detail
+
+
+def test_a_zero_limit_fails_rather_than_passing_with_no_coverage(tmp_path):
+    """A check that examines nothing cannot fail, and this module's rule is that
+    something which cannot fail is not a check."""
+    res = gt.RegistryMarkersIntended(_Registry(), [_Cfg("a")], tmp_path, limit=0)()
+    assert not res.ok and res.fatal and "cannot fail" in res.detail

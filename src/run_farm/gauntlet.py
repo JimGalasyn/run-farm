@@ -670,9 +670,27 @@ class RegistryMarkersIntended:
     part of the `RunConfig` protocol and is required to embed the config hash —
     and asks the registry `is_complete`.
 
-    That keeps it correct for any `RunRegistry`, not just directory-backed ones.
+    **The handle must be built where the registry looks.** Registries do not agree
+    on what keys completion: `ObjectStoreRunRegistry.is_complete` reads
+    `handle.name`, but `FileRunRegistry.is_complete` reads `handle.dir` — so a
+    handle built under the wrong directory makes every finished run report as
+    unfinished, and this check returns a clean pass on exactly the failure it
+    exists to catch. That is worse than the unreachable-registry case already
+    treated as fatal: unknown skip state is loud, wrong skip state is silent.
+
+    So `out_dir` is not an arbitrary output location, it is **the registry's own
+    base**, and where the registry exposes that (`.base`), a mismatch is a FATAL
+    failure rather than a silent all-clear. Registries that key off `handle.name`
+    are unaffected either way; a directory-keyed registry that exposes no base
+    cannot be verified here, and `proves` says so instead of implying otherwise.
+    Pass `handle_for` to supply a non-mutating handle factory for a registry whose
+    layout this cannot infer.
+
     Marker *age* is best-effort: it needs a real directory, so an object-store
-    registry reports the skip without a timestamp rather than failing.
+    registry reports the skip without a timestamp rather than failing. It reads
+    the run directory's mtime, which tracks the last entry added to that directory
+    rather than the moment the result was produced — close enough to spot a marker
+    from a previous campaign, not a provenance record.
 
     `limit` bounds the scan. Completion is one stat (or one object-store head) per
     config, which is cheap per item and not free at sweep scale; past the limit the
@@ -683,15 +701,38 @@ class RegistryMarkersIntended:
     name = "registry-markers-intended"
 
     def __init__(self, registry, configs: Iterable, out_dir: str | Path,
-                 limit: int = 2000):
+                 limit: int = 2000, handle_for=None):
         self.registry = registry
         self.configs = list(configs)
         self.out_dir = Path(out_dir)
         self.limit = int(limit)
+        self.handle_for = handle_for
 
     def _handle(self, config) -> RunHandle:
+        if self.handle_for is not None:
+            return self.handle_for(config)
         name = config.run_name()
         return RunHandle(config=config, dir=self.out_dir / name, name=name)
+
+    def _base_mismatch(self) -> str | None:
+        """The registry's own base, when it exposes one and it disagrees.
+
+        Only meaningful for registries that resolve completion through
+        `handle.dir`; a name-keyed registry is unaffected by the directory, so a
+        difference there is not a defect. Checked regardless, because a caller who
+        passed a base that is not the registry's base has a bug either way.
+        """
+        if self.handle_for is not None:
+            return None
+        base = getattr(self.registry, "base", None)
+        if base is None:
+            return None
+        try:
+            if Path(base).resolve() != self.out_dir.resolve():
+                return str(base)
+        except OSError:
+            return None
+        return None
 
     def __call__(self) -> CheckResult:
         proves = ("names every config the registry already considers complete, "
@@ -699,7 +740,25 @@ class RegistryMarkersIntended:
                   "prove those results came from the current parameters — the "
                   "config hash covers the serialized config, so a run whose "
                   "MEANING changed without its bytes changing still looks "
-                  "complete. Only a human can say the arm means what it meant.")
+                  "complete. Only a human can say the arm means what it meant. "
+                  "For a registry that resolves completion through `handle.dir` "
+                  "and exposes no `base`, it does NOT prove the handles were "
+                  "built where that registry looks — pass `handle_for` if the "
+                  "layout is not `out_dir / run_name()`.")
+        if self.limit <= 0:
+            return CheckResult(
+                self.name, False,
+                f"limit={self.limit} examines nothing, so this check cannot "
+                "fail; pass a positive limit or drop the check deliberately",
+                proves)
+        mismatch = self._base_mismatch()
+        if mismatch is not None:
+            return CheckResult(
+                self.name, False,
+                f"out_dir {self.out_dir} is not the registry's base {mismatch}; "
+                "a directory-keyed registry would read completion from the wrong "
+                "location and report a clean pass while every skip stayed "
+                "invisible", proves)
         scanned = self.configs[:self.limit]
         unscanned = len(self.configs) - len(scanned)
         skipping = []
