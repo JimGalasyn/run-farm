@@ -21,6 +21,19 @@ All notable changes to this project are documented here. The format follows
   real lookup. `test_create_defaults_to_the_executors_own_key` is built directly instead,
   since its subject is the default and a fixture supplying one would assert the fixture.
   Verified by hiding `$HOME`: 377 passed with and without it, against 9 failures before.
+- **`RegistryMarkersIntended` could return a clean pass while every skip stayed
+  invisible** — found in review of the change below, before it merged. Registries do not
+  agree on what keys completion: `ObjectStoreRunRegistry.is_complete` reads
+  `handle.name`, but `FileRunRegistry.is_complete` reads `handle.dir`. The check built
+  handles as `out_dir / run_name()`, so whenever `out_dir` was not the registry's base
+  every finished run reported unfinished and the check passed — a **false all-clear on
+  the exact failure it exists to catch**, and strictly worse than the unreachable-registry
+  case already treated as fatal: unknown skip state is loud, wrong skip state is silent.
+  A base mismatch is now fatal where the registry exposes `.base`, `handle_for=` supplies
+  a factory for layouts that cannot be inferred, and `proves` no longer claims correctness
+  for dir-keyed registries it cannot verify. `limit <= 0` also now fails rather than
+  passing with zero coverage. The asymmetry is why it was easy to miss: it bites only the
+  directory-backed registry, which is the one both consumers drive.
 
 ### Added
 - **The gauntlet reaches the registry path** (`gauntlet.py`). Everything in that module

@@ -91,7 +91,7 @@ pointing an expensive engine at it.
 | `reap` | destroy orphaned instances (scoped, refuses unsafe sweeps) |
 | `testing` | physics-free RunFns for engine-less smoke tests |
 | `payload` | does what you SHIP run where it LANDS? flat-layout validation, locally |
-| `gauntlet` | the launch gauntlet -- everything that can fail before money is spent |
+| `gauntlet` | the launch gauntlet -- everything that can fail before money is spent, on both the fleet and registry paths |
 | `diagnostics` | uniform host diagnostics, with provider capability GAPS named |
 | `arrival` | verify fetched artifacts; publish so a marker never precedes its payload |
 
@@ -113,6 +113,32 @@ require_gauntlet(standard_gauntlet(
         env=(("ENGINE_COMMIT", commit),), expect=local_sha),
 ))                       # raises GauntletError listing EVERY blocker, before renting
 ```
+
+`standard_gauntlet` serves the **fleet** path — rent hosts, ship a payload, run
+`FleetLeg`s. `run_campaign` over a `RunRegistry` is the other first-class path, and it
+has no provider, host spec or SSH key to check; `registry_gauntlet` is its companion:
+
+```python
+from run_farm import registry_gauntlet, require_gauntlet
+
+require_gauntlet(registry_gauntlet(
+    registry=registry, configs=configs, out_dir=out_dir,   # out_dir IS the registry base
+    run_fn_ref="my_engine.runfns:my_run",
+))
+```
+
+It answers the same question the fleet path asks about `done_when` markers — **which
+legs are about to be skipped, and how old is the evidence** — against
+`RunRegistry.is_complete` instead. `RegistryMarkersIntended` is read-only on purpose:
+`run_campaign` defers registration to the worker that picks a config up, and a check
+that pre-registered would both reintroduce that cost and create run directories for
+work that never happens.
+
+What it deliberately does *not* check is whether the compute backend is the one your
+science needs — run-farm cannot know that, and a check defaulting to requiring nothing
+could not fail. Assert it next to your `RunFn`, against the **resolved** state rather
+than the variable meant to set it: set-but-wrong and right-by-accident both need to
+fail, and only the second is invisible.
 
 The governing rule, learned expensively: **every check must be able to fail. If it
 cannot, it is not a check.** A Vast API call once stood in for an SSH test — the key
