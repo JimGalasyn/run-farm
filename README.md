@@ -69,7 +69,11 @@ run_campaign(configs, echo_run_fn,
 ```
 
 Swap `LocalExecutor` for a `ProviderExecutor` over `VastProvider`, a `FleetExecutor`,
-or a `ModalExecutor` -- the RunFn and records are unchanged. `run_farm.testing` ships
+or a `ModalExecutor` -- the RunFn and records are unchanged. When you do, size the host
+by memory and not by name: **a `gpu_name` is not a memory spec** ("A100 SXM4" is sold as
+both 40 GB and 80 GB, and cheapest-first ordering reliably returns the 40 GB card), so
+set `HostSpec(min_gpu_ram_mb=...)` rather than discovering the mismatch after paying to
+provision the wrong hardware. `run_farm.testing` ships
 physics-free RunFns so you can smoke-test a real fleet end to end for pennies before
 pointing an expensive engine at it.
 
@@ -153,6 +157,15 @@ different layer — the injected *domain envelope* on a config dict ("can this
 configuration hold?"), where this is the local launch environment. Neither
 substitutes for the other.
 
+The same distinction one layer out: **"the marker arrived" is not "the job worked."**
+`LegResult.ok` is a statement about *transport*. Three real legs reached OK while
+measuring nothing — a marker reading `exit=1` on a 51-minute rental, an OOM that left a
+one-sample manifest scoring as a pass, and a payload that NaN'd and exited 0 with a
+perfect marker. The last is not exit-code-visible, so the check has to be about the
+**result**, and what a result looks like is payload-specific: set `FleetLeg.verdict` to
+a callable over the output directory. A verdict that *raises* is itself a verdict — the
+checker could not read the output, and calling that OK is the bug it exists to stop.
+
 Related, same principle: `diagnostics.collect` distinguishes "the host produced no
 logs" from "this provider has no `logs()` to ask" — a monitor once called a method
 that does not exist with stderr suppressed, and silence read as health. And
@@ -182,13 +195,21 @@ expected.
 
 The safety mechanisms are **best-effort, not guarantees**:
 
-- **Teardown** fires on normal, exception, and Ctrl-C exits and re-verifies the host
-  is gone — but a `SIGKILL`, a power loss, or a crash in the create→track window can
-  still leave a billing host alive. **Run `run-farm-reap` after every campaign** to
-  find and destroy strays.
+- **Teardown** fires on normal, exception, Ctrl-C and `SIGHUP` exits and re-verifies
+  the host is gone. `SIGHUP` is the one that matters in practice: a campaign run from a
+  terminal, an ssh session or an agent shell takes it when that session ends, and its
+  default disposition is *terminate* — so before 0.4.0 the interpreter died outright and
+  ran no teardown at all. But a `SIGKILL`, a power loss, or a crash in the create→track
+  window can still leave a billing host alive. **Run `run-farm-reap` after every
+  campaign** to find and destroy strays, and pass `--ledger` so rows left open by a dead
+  driver are closed too — an unclosed `rented` row counts as burning forever and will
+  eventually refuse every rent against that ledger.
 - **`CappedProvider`** refuses to *start* a rental once spend reaches the cap, but it
   is a pre-rent gate, not a mid-rental tripwire: a rental already running can still
-  overshoot by its own runtime, and the cap depends on the ledger being accurate.
+  overshoot by its own runtime, and the cap depends on the ledger being accurate. A cap
+  set *below* the campaign's own worst case is worse than either finishing or refusing
+  to start — it pays for whatever ran — so `CapClearsWorstCase` checks for that at
+  launch, non-fatally, since a tight cap you intend to babysit is legitimate.
 - **`estimate()`** is an estimate. Real cost depends on host failure rates,
   marketplace pricing, and how long your work actually runs — all of which vary.
 

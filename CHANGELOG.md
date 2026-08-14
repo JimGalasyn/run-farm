@@ -6,36 +6,47 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- **CI was red on `main` because nine RunPod tests needed a key only the dev machine has**
-  (`tests/test_runpod_provider.py`). `RunPodProvider.pubkey_path` defaults to
-  `~/.ssh/vastai.pub` and `create` reads it to fill `env.PUBLIC_KEY`, so every test
-  reaching `create` depended on that file *existing on the developer's machine*. Green
-  locally, nine failures on any runner, surfacing as `FileNotFoundError` inside `_pubkey`
-  rather than as anything about the behaviour under test. `main`'s last two CI runs
-  (`2e2b514`, `521d106`) failed identically, so every PR was landing on a red baseline —
-  which is the expensive part: a suite that is always red cannot tell you that you broke
-  something. The `mk` fixture now defaults `pubkey_path` to a real file under `tmp_path`,
-  via `setdefault` so a future `create` test cannot reintroduce the dependency by
-  forgetting it, while tests *about* key resolution still override it and exercise the
-  real lookup. `test_create_defaults_to_the_executors_own_key` is built directly instead,
-  since its subject is the default and a fixture supplying one would assert the fixture.
-  Verified by hiding `$HOME`: 377 passed with and without it, against 9 failures before.
-- **`RegistryMarkersIntended` could return a clean pass while every skip stayed
-  invisible** — found in review of the change below, before it merged. Registries do not
-  agree on what keys completion: `ObjectStoreRunRegistry.is_complete` reads
-  `handle.name`, but `FileRunRegistry.is_complete` reads `handle.dir`. The check built
-  handles as `out_dir / run_name()`, so whenever `out_dir` was not the registry's base
-  every finished run reported unfinished and the check passed — a **false all-clear on
-  the exact failure it exists to catch**, and strictly worse than the unreachable-registry
-  case already treated as fatal: unknown skip state is loud, wrong skip state is silent.
-  A base mismatch is now fatal where the registry exposes `.base`, `handle_for=` supplies
-  a factory for layouts that cannot be inferred, and `proves` no longer claims correctness
-  for dir-keyed registries it cannot verify. `limit <= 0` also now fails rather than
-  passing with zero coverage. The asymmetry is why it was easy to miss: it bites only the
-  directory-backed registry, which is the one both consumers drive.
+## [0.4.0] — What a campaign learns after it has already been billed
+
+Every item below was found by a campaign that had already paid for the lesson, or by a
+review of one. The through-line is the same as 0.2.0's: **a check that cannot fail is
+not a check** — extended here to two places it had not reached. `run_campaign` over a
+`RunRegistry` had no launch gauntlet at all, so the check that scrutinises skips could
+only run over the fleet half of the library; and the test suite itself was red on every
+runner for a reason no PR could have caused, which is the same defect one layer up — a
+signal that is always the same tells you nothing.
+
+A minor bump: four new public names and one new `HostSpec` field, all additive.
 
 ### Added
+
+- **`HostSpec.min_gpu_ram_mb`** (`protocols.py`, `vast.py`): a VRAM floor, because **a
+  `gpu_name` is not a memory spec**. "A100 SXM4" is sold as both 40 GB and 80 GB under
+  one name and `offers()` orders cheapest-first, so asking for an A100 reliably returns
+  the 40 GB card — measured 2026-08-06, cheapest 40 GB at $0.469 against $0.801 for the
+  80 GB. A leg sized for the larger card discovers the mismatch only after paying to
+  provision the wrong hardware. Defaults to 0, so every existing spec is unchanged. The
+  adapter **re-checks returned offers locally** rather than trusting the query: a
+  silently-ignored filter key would hand back exactly the cards the gate exists to
+  exclude, and that failure is invisible until the OOM.
+
+- **`FleetLeg.verdict`** (`fleet.py`): because *"the marker arrived"* is not *"the job
+  worked"*. `LegResult.ok` is a statement about **transport**. Three real legs reached
+  OK while measuring nothing: a marker reading `exit=1` on a 51-minute rental, an OOM
+  that left a one-sample manifest scoring as a passing measurement, and a payload that
+  NaN'd and exited 0 with a perfect marker. The third is not exit-code-visible, so the
+  check has to be about the **result** — and what a result looks like is payload-specific,
+  hence a seam rather than a rule. **A verdict that raises is itself a verdict**: the
+  checker could not read the output, and calling that OK is the bug it exists to stop.
+  `None` keeps the old behaviour.
+
+- **`CapClearsWorstCase`** (`gauntlet.py`): a cap *below* the campaign's own worst case
+  does not save money, it pays for whatever ran — worse than either finishing or
+  refusing to start. Caught by eye on 2026-08-06 ($38 cap against a $45.75 worst case).
+  Non-fatal, because a tight cap you intend to babysit is legitimate; it just must not
+  be an accident. Counts spend already on the ledger, since that is what the cap is
+  enforced against.
+
 - **The gauntlet reaches the registry path** (`gauntlet.py`). Everything in that module
   served the FLEET path — rent hosts, ship a payload, run `FleetLeg`s, resume off a
   `done_when` marker. `run_campaign` + a `RunRegistry` is the library's other first-class
@@ -62,6 +73,7 @@ All notable changes to this project are documented here. The format follows
   - **`registry_gauntlet`**: the companion to `standard_gauntlet`, which cannot be
     reused — it is built around a provider, a host spec and an SSH key, none of which a
     local or in-cluster campaign has.
+
 - **`RemoteEnvPinned` now documents what it cannot reach** (`gauntlet.py`): the RESOLVED
   state. It proves the executor is configured to *ship* a variable, not that the variable
   had the effect it was set for. Both halves fail silently and identically. An engine
@@ -74,6 +86,65 @@ Found while farming a Morphospace calibration sweep, where the engine's own arm 
 reproducible only on CPU: run it on the GPU and every leg returns entirely plausible
 numbers whose reproducibility claim is void. That check belongs to the engine, but the
 two above did not, and neither existed.
+
+### Fixed
+
+- **`SIGHUP` is the signal a farm actually dies of** (`fleet.py`). The signal-safe
+  teardown covered `SIGTERM` and `SIGINT`, and neither is what kills a driver in
+  practice: a campaign run from a terminal, an ssh session or an agent shell takes
+  `SIGHUP` when that session ends, and its default disposition is *terminate* — so the
+  interpreter died outright, running no `finally`, no `_destroy_live`, and no `rent()`
+  teardown, and every in-flight box billed until a human noticed. Observed rather than
+  theorised: on 2026-08-05 a five-leg ladder lost its driver at session end, the legs
+  finished on-box ~8 minutes later with nobody left to tear them down, and the boxes
+  idled ~10 h for **$16.29**. POSIX-only, resolved through `getattr` so it drops out on
+  Windows rather than failing the import.
+
+- **`reap(ledger=...)` closes the rows a dead driver never wrote, so spend stops
+  phantoming** (`reap.py`). It targeted leaked-*and-still-live* instances, so a row that
+  leaked and was then destroyed outside the ledger's knowledge was never a target and
+  never closed — while `budget._in_flight_usd` counts any unclosed `rented` row as still
+  burning at dph × elapsed-to-now. The phantom grows forever and eventually refuses every
+  rent against that ledger. Observed 2026-08-06: five rows left open by a SIGHUP'd driver
+  read as ~$21 of in-flight spend against a $12 campaign, and the cap refused a $0.42 leg
+  — and destroying the boxes did not fix it, because reaping never looked at those rows.
+  Two cases, costed differently because they are *known* differently: **destroyed**
+  (watched live and killed here, so rent→now at its dph is what was billed — a real cost)
+  and **vanished** (leaked per the ledger, absent from the live listing; gone, but *when*
+  is unknowable from here, so booked at 0 with `cost_unknown=true` and the upper bound
+  recorded beside it). Inventing a number for `vanished` would be worse than either error
+  it avoids: the rent→now bound *is* the phantom, and a silent non-zero corrupts the one
+  record that says what a campaign cost. A grace period keeps the inverse failure out,
+  since Vast can log `rented` before the box appears in `list_instances()`.
+
+- **CI was red on `main` because nine RunPod tests needed a key only the dev machine has**
+  (`tests/test_runpod_provider.py`). `RunPodProvider.pubkey_path` defaults to
+  `~/.ssh/vastai.pub` and `create` reads it to fill `env.PUBLIC_KEY`, so every test
+  reaching `create` depended on that file *existing on the developer's machine*. Green
+  locally, nine failures on any runner, surfacing as `FileNotFoundError` inside `_pubkey`
+  rather than as anything about the behaviour under test. `main`'s last two CI runs
+  (`2e2b514`, `521d106`) failed identically, so every PR was landing on a red baseline —
+  which is the expensive part: a suite that is always red cannot tell you that you broke
+  something. The `mk` fixture now defaults `pubkey_path` to a real file under `tmp_path`,
+  via `setdefault` so a future `create` test cannot reintroduce the dependency by
+  forgetting it, while tests *about* key resolution still override it and exercise the
+  real lookup. `test_create_defaults_to_the_executors_own_key` is built directly instead,
+  since its subject is the default and a fixture supplying one would assert the fixture.
+  Verified by hiding `$HOME`: 377 passed with and without it, against 9 failures before.
+
+- **`RegistryMarkersIntended` could return a clean pass while every skip stayed
+  invisible** — found in review of the change below, before it merged. Registries do not
+  agree on what keys completion: `ObjectStoreRunRegistry.is_complete` reads
+  `handle.name`, but `FileRunRegistry.is_complete` reads `handle.dir`. The check built
+  handles as `out_dir / run_name()`, so whenever `out_dir` was not the registry's base
+  every finished run reported unfinished and the check passed — a **false all-clear on
+  the exact failure it exists to catch**, and strictly worse than the unreachable-registry
+  case already treated as fatal: unknown skip state is loud, wrong skip state is silent.
+  A base mismatch is now fatal where the registry exposes `.base`, `handle_for=` supplies
+  a factory for layouts that cannot be inferred, and `proves` no longer claims correctness
+  for dir-keyed registries it cannot verify. `limit <= 0` also now fails rather than
+  passing with zero coverage. The asymmetry is why it was easy to miss: it bites only the
+  directory-backed registry, which is the one both consumers drive.
 
 ## [0.3.0] — The worker's environment, and a channel death that is not a work failure
 
