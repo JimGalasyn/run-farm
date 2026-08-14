@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/run-farm)](https://pypi.org/project/run-farm/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Status: alpha (0.2.x).** The API will change without notice until 1.0.
+> **Status: alpha (0.4.x).** The API will change without notice until 1.0.
 >
 > **⚠ This tool spends real money.** It rents billable cloud GPUs on your accounts.
 > You are solely responsible for all charges it incurs. See
