@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **CI was red on `main` because nine RunPod tests needed a key only the dev machine has**
+  (`tests/test_runpod_provider.py`). `RunPodProvider.pubkey_path` defaults to
+  `~/.ssh/vastai.pub` and `create` reads it to fill `env.PUBLIC_KEY`, so every test
+  reaching `create` depended on that file *existing on the developer's machine*. Green
+  locally, nine failures on any runner, surfacing as `FileNotFoundError` inside `_pubkey`
+  rather than as anything about the behaviour under test. `main`'s last two CI runs
+  (`2e2b514`, `521d106`) failed identically, so every PR was landing on a red baseline —
+  which is the expensive part: a suite that is always red cannot tell you that you broke
+  something. The `mk` fixture now defaults `pubkey_path` to a real file under `tmp_path`,
+  via `setdefault` so a future `create` test cannot reintroduce the dependency by
+  forgetting it, while tests *about* key resolution still override it and exercise the
+  real lookup. `test_create_defaults_to_the_executors_own_key` is built directly instead,
+  since its subject is the default and a fixture supplying one would assert the fixture.
+  Verified by hiding `$HOME`: 377 passed with and without it, against 9 failures before.
+
 ## [0.3.0] — The worker's environment, and a channel death that is not a work failure
 
 The version had read `0.2.0` — the same string PyPI serves — while the branch sat ten
