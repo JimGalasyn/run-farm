@@ -29,8 +29,8 @@ keywords:
   - modal
   - jax
 license: MIT
-version: 0.3.0
-date-released: "2026-08-04"
+version: 0.4.0
+date-released: "2026-08-14"
 doi: 10.5281/zenodo.21419776
 identifiers:
   - type: doi
@@ -45,3 +45,6 @@ identifiers:
   - type: doi
     value: 10.5281/zenodo.21726314
     description: Version DOI (v0.2.0)
+  - type: doi
+    value: 10.5281/zenodo.21799717
+    description: Version DOI (v0.3.0)
