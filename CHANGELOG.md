@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`CITATION.cff` records v0.4.0's DOI** (`10.5281/zenodo.21940610`), rather than three
+  releases late. v0.1.1, v0.2.0 and v0.3.0 were each minted and left unrecorded, and
+  v0.3.0's was recovered only during the 0.4.0 release, two releases after it was cut.
+- **The README status line said `0.2.x`**, two releases behind. It is the only hardcoded
+  version in that file — the badges around it are dynamic and stayed correct, which is
+  why it drifted unnoticed.
+
+### Changed
+- **`docs/RELEASING.md` now carries the failures, not just the steps** (17 → 87 lines).
+  Bump/tag/publish was all it documented, and every problem this release hit was outside
+  those three steps: a changelog missing four of seven commits at tag time, a version DOI
+  never recorded, a `date-released` in local time where Zenodo publishes in UTC, and a
+  status line two series stale. Each item now sits next to the release it went wrong on,
+  and the verification commands are the ones actually run against this release rather
+  than plausible-looking ones — a green publish workflow means the workflow ran, not that
+  PyPI serves the package or that the DOI resolves.
+
 ## [0.4.0] — What a campaign learns after it has already been billed
 
 Every item below was found by a campaign that had already paid for the lesson, or by a
