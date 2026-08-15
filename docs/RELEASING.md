@@ -1,5 +1,13 @@
 # Releasing
 
+> **Cross-repo release failure modes live in the `publish-release` skill**
+> (`claude-shared/skills/publish-release`). It carries what has bitten across all of
+> these repos — green workflows that published nothing, PyPI propagation lying in both
+> directions, the DOI commit that the *next* release's changelog check always flags, and
+> the one-time setup steps that cannot be undone. **This file keeps what is specific to
+> this repo**; the two are deliberately not copies of each other, because duplicated
+> process drifts.
+
 Three steps do the release. The rest of this file is the things that have actually
 gone wrong around them, each written next to the release it went wrong on — because
 none of them were caught by a test, and every one was found later by someone
